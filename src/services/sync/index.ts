@@ -8,6 +8,7 @@ import { i18n } from '@services/libs/i18n';
 import { logger } from '@services/libs/log';
 import type { IPreferenceService } from '@services/preferences/interface';
 import serviceIdentifier from '@services/serviceIdentifier';
+import type { ITiddlyWebSyncService } from '@services/tiddlywebSync/interface';
 import { SupportedStorageServices } from '@services/types';
 import type { IViewService } from '@services/view/interface';
 import type { IWikiService } from '@services/wiki/interface';
@@ -62,6 +63,13 @@ export class Sync implements ISyncService {
     if (storageService === SupportedStorageServices.local) {
       // for local workspace, commitOnly, no sync and no force pull.
       await gitService.commitAndSync(workspace, { dir: wikiFolderLocation, commitOnly: true, commitMessage: localCommitMessage });
+    } else if (storageService === SupportedStorageServices.tiddlyweb) {
+      // TiddlyWeb (HTTP) sync — talks to a remote TiddlyWiki NodeJS server, not Git.
+      // We delegate the whole pass to the TiddlyWebSync service which handles
+      // its own concurrency (one in-flight sync per workspace) and conflict
+      // policy. There is no concept of sub-wikis for TiddlyWeb sync.
+      const tiddlyWebSync = container.get<ITiddlyWebSyncService>(serviceIdentifier.TiddlyWebSync);
+      await tiddlyWebSync.syncWorkspace(idToUse);
     } else if (
       typeof gitUrl === 'string' &&
       userInfo !== undefined
@@ -149,15 +157,31 @@ export class Sync implements ISyncService {
    */
   private wikiSyncIntervals: Record<string, ReturnType<typeof setInterval>> = {};
   /**
-   * Trigger git sync interval if needed in config
+   * Trigger git sync interval if needed in config.
+   *
+   * For TiddlyWeb workspaces we always schedule interval sync (using the
+   * per-workspace `tiddlywebSyncIntervalMs`, default 30s) regardless of the
+   * `syncOnInterval`/`backupOnInterval` flags — those flags are git-centric.
+   * For other storage services we honour them as before and use the global
+   * `syncDebounceInterval` preference.
    */
   public async startIntervalSyncIfNeeded(workspace: IWorkspace): Promise<void> {
     if (!isWikiWorkspace(workspace)) {
       return;
     }
-    const { syncOnInterval, backupOnInterval, id } = workspace;
+    const { syncOnInterval, backupOnInterval, id, storageService } = workspace;
     // Clear existing interval first to avoid duplicates when settings are updated
     this.stopIntervalSync(id);
+
+    if (storageService === SupportedStorageServices.tiddlyweb) {
+      const intervalMs = workspace.tiddlywebSyncIntervalMs && workspace.tiddlywebSyncIntervalMs > 0
+        ? workspace.tiddlywebSyncIntervalMs
+        : 30_000;
+      this.wikiSyncIntervals[id] = setInterval(async () => {
+        await this.syncWikiIfNeeded(workspace);
+      }, intervalMs);
+      return;
+    }
 
     if (syncOnInterval || backupOnInterval) {
       const syncDebounceInterval = await this.preferenceService.get('syncDebounceInterval');
@@ -169,8 +193,13 @@ export class Sync implements ISyncService {
   }
 
   public stopIntervalSync(workspaceID: string): void {
-    if (typeof this.wikiSyncIntervals[workspaceID] === 'number') {
-      clearInterval(this.wikiSyncIntervals[workspaceID]);
+    // setInterval returns a `Timeout` object in Node.js (not a number), so the
+    // previous `typeof === 'number'` guard never matched and intervals leaked.
+    // Truthy check works for both Node Timeouts and browser numeric handles.
+    const handle = this.wikiSyncIntervals[workspaceID];
+    if (handle) {
+      clearInterval(handle);
+      delete this.wikiSyncIntervals[workspaceID];
     }
   }
 

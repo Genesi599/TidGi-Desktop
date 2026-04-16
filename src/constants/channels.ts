@@ -160,6 +160,12 @@ export enum SyncChannel {
   name = 'SyncChannel',
 }
 
+export enum TiddlyWebSyncChannel {
+  name = 'TiddlyWebSyncChannel',
+  /** Broadcast sync progress to UI */
+  progress = 'tiddlyweb-sync-progress',
+}
+
 export enum AgentChannel {
   definition = 'AgentDefinitionChannel',
   instance = 'AgentInstanceChannel',
@@ -196,5 +202,6 @@ export type Channels =
   | I18NChannels
   | MetaDataChannel
   | SyncChannel
+  | TiddlyWebSyncChannel
   | AgentChannel
   | WikiEmbeddingChannel;

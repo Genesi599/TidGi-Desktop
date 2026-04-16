@@ -21,6 +21,7 @@ import { type INotificationService, NotificationServiceIPCDescriptor } from '@se
 import { type IPreferenceService, PreferenceServiceIPCDescriptor } from '@services/preferences/interface';
 import { type ISyncService, SyncServiceIPCDescriptor } from '@services/sync/interface';
 import { type ISystemPreferenceService, SystemPreferenceServiceIPCDescriptor } from '@services/systemPreferences/interface';
+import { type ITiddlyWebSyncService, TiddlyWebSyncServiceIPCDescriptor } from '@services/tiddlywebSync/interface';
 import { type IThemeService, ThemeServiceIPCDescriptor } from '@services/theme/interface';
 import { type IUpdaterService, UpdaterServiceIPCDescriptor } from '@services/updater/interface';
 import { type IViewService, ViewServiceIPCDescriptor } from '@services/view/interface';
@@ -46,6 +47,7 @@ export const notification = createProxy<INotificationService>(NotificationServic
 export const preference = createProxy<IPreferenceService>(PreferenceServiceIPCDescriptor);
 export const sync = createProxy<ISyncService>(SyncServiceIPCDescriptor);
 export const systemPreference = createProxy<ISystemPreferenceService>(SystemPreferenceServiceIPCDescriptor);
+export const tiddlyWebSync = createProxy<ITiddlyWebSyncService>(TiddlyWebSyncServiceIPCDescriptor);
 export const theme = createProxy<IThemeService>(ThemeServiceIPCDescriptor);
 export const updater = createProxy<IUpdaterService>(UpdaterServiceIPCDescriptor);
 export const view = createProxy<AsyncifyProxy<IViewService>>(ViewServiceIPCDescriptor);
@@ -70,6 +72,7 @@ export const descriptors = {
   preference: PreferenceServiceIPCDescriptor,
   sync: SyncServiceIPCDescriptor,
   systemPreference: SystemPreferenceServiceIPCDescriptor,
+  tiddlyWebSync: TiddlyWebSyncServiceIPCDescriptor,
   theme: ThemeServiceIPCDescriptor,
   updater: UpdaterServiceIPCDescriptor,
   view: ViewServiceIPCDescriptor,

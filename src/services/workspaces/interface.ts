@@ -65,6 +65,11 @@ export const syncableConfigDefaultValues = {
   isSubWiki: false,
   mainWikiID: null as string | null,
   mainWikiToLink: null as string | null,
+  tiddlywebUrl: null as string | null,
+  tiddlywebRecipe: 'default',
+  tiddlywebUsername: '',
+  tiddlywebSyncIntervalMs: 30_000,
+  tiddlywebExcludeFilter: '[prefix[$:/]]' as string,
 } as const;
 
 export const localConfigDefaultValues = {
@@ -250,6 +255,30 @@ export interface IWikiWorkspace extends IDedicatedWorkspace {
    * folder path for this wiki workspace
    */
   wikiFolderLocation: string;
+  /**
+   * When storageService === 'tiddlyweb', this is the remote NodeJS TW server URL (no trailing slash),
+   * e.g. `https://wiki.example.com`. The HTTP sync service will talk to
+   * `${tiddlywebUrl}/recipes/${tiddlywebRecipe}/tiddlers{,.json}`.
+   */
+  tiddlywebUrl?: string | null;
+  /**
+   * Recipe name on the remote TW server. Defaults to 'default'.
+   */
+  tiddlywebRecipe?: string;
+  /**
+   * Username for Basic Auth on the remote TW server. Password is stored in the auth service
+   * under the `tiddlyweb-token` key.
+   */
+  tiddlywebUsername?: string;
+  /**
+   * How often (ms) to poll the remote for changes. Default 30s.
+   */
+  tiddlywebSyncIntervalMs?: number;
+  /**
+   * TiddlyWiki filter expression selecting tiddlers to EXCLUDE from sync.
+   * Default `[prefix[$:/]]` excludes all system tiddlers.
+   */
+  tiddlywebExcludeFilter?: string;
   /**
    * Enable file system watching (experimental feature using chokidar)
    * When enabled, external file changes will be synced to the wiki automatically

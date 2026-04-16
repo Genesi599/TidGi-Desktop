@@ -21,6 +21,7 @@ import { NotificationService } from '@services/notifications';
 import { Preference } from '@services/preferences';
 import { Sync } from '@services/sync';
 import { SystemPreference } from '@services/systemPreferences';
+import { TiddlyWebSync } from '@services/tiddlywebSync';
 import { ThemeService } from '@services/theme';
 import { Updater } from '@services/updater';
 import { View } from '@services/view';
@@ -57,6 +58,8 @@ import { PreferenceServiceIPCDescriptor } from '@services/preferences/interface'
 import type { ISyncService } from '@services/sync/interface';
 import { SyncServiceIPCDescriptor } from '@services/sync/interface';
 import type { ISystemPreferenceService } from '@services/systemPreferences/interface';
+import type { ITiddlyWebSyncService } from '@services/tiddlywebSync/interface';
+import { TiddlyWebSyncServiceIPCDescriptor } from '@services/tiddlywebSync/interface';
 import { SystemPreferenceServiceIPCDescriptor } from '@services/systemPreferences/interface';
 import type { IThemeService } from '@services/theme/interface';
 import { ThemeServiceIPCDescriptor } from '@services/theme/interface';
@@ -96,6 +99,7 @@ export function bindServiceAndProxy(): void {
   container.bind<IPreferenceService>(serviceIdentifier.Preference).to(Preference).inSingletonScope();
   container.bind<ISyncService>(serviceIdentifier.Sync).to(Sync).inSingletonScope();
   container.bind<ISystemPreferenceService>(serviceIdentifier.SystemPreference).to(SystemPreference).inSingletonScope();
+  container.bind<ITiddlyWebSyncService>(serviceIdentifier.TiddlyWebSync).to(TiddlyWebSync).inSingletonScope();
   container.bind<IThemeService>(serviceIdentifier.ThemeService).to(ThemeService).inSingletonScope();
   container.bind<IUpdaterService>(serviceIdentifier.Updater).to(Updater).inSingletonScope();
   container.bind<IViewService>(serviceIdentifier.View).to(View).inSingletonScope();
@@ -122,6 +126,7 @@ export function bindServiceAndProxy(): void {
   const preferenceService = container.get<IPreferenceService>(serviceIdentifier.Preference);
   const syncService = container.get<ISyncService>(serviceIdentifier.Sync);
   const systemPreferenceService = container.get<ISystemPreferenceService>(serviceIdentifier.SystemPreference);
+  const tiddlyWebSyncService = container.get<ITiddlyWebSyncService>(serviceIdentifier.TiddlyWebSync);
   const themeService = container.get<IThemeService>(serviceIdentifier.ThemeService);
   const updaterService = container.get<IUpdaterService>(serviceIdentifier.Updater);
   const viewService = container.get<IViewService>(serviceIdentifier.View);
@@ -148,6 +153,7 @@ export function bindServiceAndProxy(): void {
   registerProxy(preferenceService, PreferenceServiceIPCDescriptor);
   registerProxy(syncService, SyncServiceIPCDescriptor);
   registerProxy(systemPreferenceService, SystemPreferenceServiceIPCDescriptor);
+  registerProxy(tiddlyWebSyncService, TiddlyWebSyncServiceIPCDescriptor);
   registerProxy(themeService, ThemeServiceIPCDescriptor);
   registerProxy(updaterService, UpdaterServiceIPCDescriptor);
   registerProxy(viewService, ViewServiceIPCDescriptor);

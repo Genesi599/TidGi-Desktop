@@ -25,6 +25,7 @@ export enum SupportedStorageServicesForSync {
   local = 'local',
   solid = 'solid',
   testOAuth = 'testOAuth',
+  tiddlyweb = 'tiddlyweb',
 }
 
 /**
@@ -61,6 +62,11 @@ export const syncableConfigFields = [
   'https',
   'isSubWiki',
   'mainWikiID',
+  'tiddlywebUrl',
+  'tiddlywebRecipe',
+  'tiddlywebUsername',
+  'tiddlywebSyncIntervalMs',
+  'tiddlywebExcludeFilter',
 ] as const;
 
 /**
@@ -101,6 +107,16 @@ export const syncableConfigDefaultValues = {
   https: undefined as { enabled: boolean; tlsCert?: string; tlsKey?: string } | undefined,
   isSubWiki: false,
   mainWikiID: null as string | null,
+  tiddlywebUrl: null as string | null,
+  tiddlywebRecipe: 'default',
+  tiddlywebUsername: '',
+  tiddlywebSyncIntervalMs: 30_000,
+  /**
+   * TiddlyWiki filter expression for tiddlers to EXCLUDE from sync.
+   * Default excludes all $:/ system tiddlers (config / state / plugins / temp).
+   * User can override, e.g. to include certain settings: `[prefix[$:/temp/]] [prefix[$:/state/]]`
+   */
+  tiddlywebExcludeFilter: '[prefix[$:/]]' as string,
 } as const;
 
 /**
@@ -133,6 +149,11 @@ export type ISyncableWikiConfig = {
   https?: { enabled: boolean; tlsCert?: string; tlsKey?: string };
   isSubWiki: boolean;
   mainWikiID: string | null;
+  tiddlywebUrl?: string | null;
+  tiddlywebRecipe?: string;
+  tiddlywebUsername?: string;
+  tiddlywebSyncIntervalMs?: number;
+  tiddlywebExcludeFilter?: string;
 };
 
 /**

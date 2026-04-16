@@ -14,6 +14,7 @@ export default {
   NotificationService: Symbol.for('NotificationService'),
   Preference: Symbol.for('Preference'),
   Sync: Symbol.for('Sync'),
+  TiddlyWebSync: Symbol.for('TiddlyWebSync'),
   SystemPreference: Symbol.for('SystemPreference'),
   ThemeService: Symbol.for('ThemeService'),
   Updater: Symbol.for('Updater'),

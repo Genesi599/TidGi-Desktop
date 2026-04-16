@@ -19,4 +19,10 @@ export enum SupportedStorageServices {
   solid = 'solid',
   /** Local test OAuth server (for E2E testing only) */
   testOAuth = 'testOAuth',
+  /**
+   * Remote NodeJS TiddlyWiki server via TiddlyWeb-compatible REST API.
+   * Bidirectional HTTP sync: TidGi polls the remote for changes and pushes local changes back.
+   * See @services/tiddlywebSync
+   */
+  tiddlyweb = 'tiddlyweb',
 }

@@ -14,6 +14,7 @@ import type { INotificationService } from '@services/notifications/interface';
 import type { IPreferenceService } from '@services/preferences/interface';
 import type { ISyncService } from '@services/sync/interface';
 import type { ISystemPreferenceService } from '@services/systemPreferences/interface';
+import type { ITiddlyWebSyncService } from '@services/tiddlywebSync/interface';
 import type { IThemeService } from '@services/theme/interface';
 import type { IUpdaterService } from '@services/updater/interface';
 import type { IViewService } from '@services/view/interface';
@@ -41,6 +42,7 @@ export type TidgiService = {
   preference: IPreferenceService;
   sync: ISyncService;
   systemPreference: ISystemPreferenceService;
+  tiddlyWebSync: ITiddlyWebSyncService;
   theme: IThemeService;
   updater: IUpdaterService;
   view: IViewService;
