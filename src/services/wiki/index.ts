@@ -3,7 +3,7 @@ import { createWorkerProxy, terminateWorker } from '@services/libs/workerAdapter
 import { dialog, shell } from 'electron';
 import { attachWorker } from 'electron-ipc-cat/server';
 import { backOff } from 'exponential-backoff';
-import { copy, exists, mkdir, mkdirs, pathExists, readdir, readFile } from 'fs-extra';
+import { copy, emptyDir, exists, mkdir, mkdirs, pathExists, readdir, readFile } from 'fs-extra';
 import { inject, injectable } from 'inversify';
 import path from 'path';
 import { Worker } from 'worker_threads';
@@ -58,6 +58,29 @@ export class Wiki implements IWikiService {
   }
 
   // handlers
+  /**
+   * Wipe the contents of a wiki's `tiddlers/` folder (keep the folder itself).
+   *
+   * Used by the "Clone from TiddlyWeb server" workflow: TidGi's template ships
+   * ~76 pre-baked `.tid`/`.json` files (an `Index.tid` welcome tiddler + 12MB
+   * of plugin JSON bodies under `tiddlers/system/`). Without wiping those, the
+   * very first sync would see them as "local-only, new" and PUSH them all to
+   * the remote server — polluting the server and possibly breaking it.
+   *
+   * `tiddlywiki.info`, `plugins/`, `public/`, `scripts/`, `.github/`, etc. are
+   * left untouched. Those drive the local wiki's boot sequence; they never
+   * travel over the TiddlyWeb API.
+   */
+  public async emptyWikiTiddlersFolder(wikiFolderPath: string): Promise<void> {
+    const tiddlersDir = path.join(wikiFolderPath, 'tiddlers');
+    if (!(await pathExists(tiddlersDir))) {
+      logger.debug('emptyWikiTiddlersFolder: tiddlers/ does not exist, nothing to do', { tiddlersDir });
+      return;
+    }
+    logger.info('Emptying tiddlers/ folder for clean clone', { tiddlersDir });
+    await emptyDir(tiddlersDir);
+  }
+
   public async copyWikiTemplate(newFolderPath: string, folderName: string): Promise<void> {
     logger.info('starting', {
       newFolderPath,

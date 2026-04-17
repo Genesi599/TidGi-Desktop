@@ -28,6 +28,12 @@ export interface IWikiService {
   cloneWiki(parentFolderLocation: string, wikiFolderName: string, gitRepoUrl: string, gitUserInfo: IGitUserInfos): Promise<void>;
   copyWikiTemplate(newFolderPath: string, folderName: string): Promise<void>;
   /**
+   * Wipe the contents of a wiki's `tiddlers/` folder (keep the folder itself).
+   * Used by the "Clone from TiddlyWeb server" workflow to avoid pushing the
+   * template's bundled plugin tiddlers to the remote on first sync.
+   */
+  emptyWikiTiddlersFolder(wikiFolderPath: string): Promise<void>;
+  /**
    * create sub wiki in a parent folder, and link to a main wiki, and set tagName to filesystemPath.tid
    * @param parentFolderLocation
    * @param folderName
@@ -112,6 +118,7 @@ export const WikiServiceIPCDescriptor = {
     cloneSubWiki: ProxyPropertyType.Function,
     cloneWiki: ProxyPropertyType.Function,
     copyWikiTemplate: ProxyPropertyType.Function,
+    emptyWikiTiddlersFolder: ProxyPropertyType.Function,
     createSubWiki: ProxyPropertyType.Function,
     ensureWikiExist: ProxyPropertyType.Function,
     extractWikiHTML: ProxyPropertyType.Function,

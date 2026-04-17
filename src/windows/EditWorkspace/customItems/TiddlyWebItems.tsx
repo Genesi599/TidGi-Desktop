@@ -15,6 +15,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   CircularProgress,
   LinearProgress,
   Stack,
@@ -42,6 +43,43 @@ const IN_FLIGHT_PHASES: ReadonlySet<TiddlyWebSyncProgressEvent['phase']> = new S
   'reconciled',
   'applying',
 ]);
+
+/**
+ * One-click presets for the exclude filter. Each entry's `value` is the exact
+ * filter string we'll write to the workspace; `labelKey` / `descriptionKey`
+ * are i18n keys rendered as the chip label / tooltip.
+ *
+ * - contentOnly: safest default — skip ALL system tiddlers. This is the
+ *   original TidGi default and works even against third-party TW servers.
+ * - contentAndSettings: sync user-customised system tiddlers (site title,
+ *   palette, custom CSS) but NOT plugin / theme / language bodies. Recommended
+ *   when both sides run different TW versions.
+ * - fullMirror: only skip transient UI state. Everything else — including
+ *   any system tiddler the server exposes — gets synced. True "mirror" semantics.
+ *   `$:/sync/` is always excluded to avoid syncing our own conflict backups.
+ */
+const FILTER_PRESETS: ReadonlyArray<{
+  id: 'contentOnly' | 'contentAndSettings' | 'fullMirror';
+  value: string;
+  labelKey: string;
+}> = [
+  {
+    id: 'contentOnly',
+    value: '[prefix[$:/]]',
+    labelKey: 'EditWorkspace.TiddlyWebFilterPresetContentOnly',
+  },
+  {
+    id: 'contentAndSettings',
+    value:
+      '[prefix[$:/temp/]] [prefix[$:/state/]] [prefix[$:/HistoryList]] [prefix[$:/plugins/]] [prefix[$:/themes/]] [prefix[$:/languages/]] [prefix[$:/boot/]] [prefix[$:/core]] [prefix[$:/sync/]]',
+    labelKey: 'EditWorkspace.TiddlyWebFilterPresetContentAndSettings',
+  },
+  {
+    id: 'fullMirror',
+    value: '[prefix[$:/temp/]] [prefix[$:/state/]] [prefix[$:/HistoryList]] [prefix[$:/sync/]]',
+    labelKey: 'EditWorkspace.TiddlyWebFilterPresetFullMirror',
+  },
+];
 
 export function TiddlyWebConfigItem(): React.JSX.Element | null {
   const { t } = useTranslation();
@@ -256,6 +294,24 @@ export function TiddlyWebConfigItem(): React.JSX.Element | null {
           }}
           data-testid='tiddlyweb-exclude-filter-input'
         />
+        <Stack direction='row' spacing={1} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+          <Typography variant='caption' color='text.secondary' sx={{ alignSelf: 'center', mr: 0.5 }}>
+            {t('EditWorkspace.TiddlyWebFilterPresetsLabel')}:
+          </Typography>
+          {FILTER_PRESETS.map((preset) => (
+            <Chip
+              key={preset.id}
+              label={t(preset.labelKey)}
+              size='small'
+              variant={excludeFilter === preset.value ? 'filled' : 'outlined'}
+              color={excludeFilter === preset.value ? 'primary' : 'default'}
+              onClick={() => {
+                workspaceSetter({ ...workspace, tiddlywebExcludeFilter: preset.value });
+              }}
+              data-testid={`tiddlyweb-filter-preset-${preset.id}`}
+            />
+          ))}
+        </Stack>
       </Stack>
 
       <Stack direction='row' spacing={1} sx={{ mt: 2, flexWrap: 'wrap' }}>

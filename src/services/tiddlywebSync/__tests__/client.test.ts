@@ -78,6 +78,26 @@ describe('TiddlyWebClient', () => {
     expect(result).toEqual([{ title: 'Foo', revision: '1', bag: undefined, modified: undefined }]);
   });
 
+  test('listAll: accepts numeric revisions (on-disk tiddlers default to revision: 0)', async () => {
+    // Real-world TW server bug triggered here: tiddlers loaded from .tid files
+    // have revision as a NUMBER (0), not a string. Earlier filter required
+    // `typeof revision === 'string'` which dropped every single tiddler silently.
+    const { fetchImpl } = makeFetch(() =>
+      jsonResponse([
+        { title: 'OnDisk1', revision: 0 },
+        { title: 'OnDisk2', revision: 0, tags: '' },
+        { title: 'Edited', revision: '3', bag: 'default' },
+      ]),
+    );
+    const client = new TiddlyWebClient({ baseUrl: 'https://w', recipe: 'r', fetchImpl });
+    const result = await client.listAll();
+    expect(result).toEqual([
+      { title: 'OnDisk1', revision: '0', bag: undefined, modified: undefined },
+      { title: 'OnDisk2', revision: '0', bag: undefined, modified: undefined },
+      { title: 'Edited', revision: '3', bag: 'default', modified: undefined },
+    ]);
+  });
+
   test('listAll: throws TiddlyWebHttpError on non-2xx', async () => {
     const { fetchImpl } = makeFetch(() => new Response('Forbidden', { status: 403 }));
     const client = new TiddlyWebClient({ baseUrl: 'https://w', recipe: 'r', fetchImpl });

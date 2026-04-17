@@ -27,6 +27,8 @@ import { ExistedWikiDoneButton } from './ExistedWikiDoneButton';
 import { ExistedWikiForm } from './ExistedWikiForm';
 import { NewWikiDoneButton } from './NewWikiDoneButton';
 import { NewWikiForm } from './NewWikiForm';
+import { TiddlyWebWikiDoneButton } from './TiddlyWebWikiDoneButton';
+import { type ITiddlyWebWikiFormValues, TiddlyWebWikiForm } from './TiddlyWebWikiForm';
 import { IErrorInWhichComponent, useWikiWorkspaceForm } from './useForm';
 
 import { TokenForm } from '@/components/TokenForm';
@@ -87,8 +89,15 @@ export default function AddWorkspace(): React.JSX.Element {
     (window.meta() as IPossibleWindowMeta<WindowMeta[WindowNames.addWorkspace]>).addWorkspaceTab ?? CreateWorkspaceTabs.CreateNewWiki,
   );
   const isCreateSyncedWorkspace = currentTab === CreateWorkspaceTabs.CloneOnlineWiki;
+  const isCloneTiddlyWeb = currentTab === CreateWorkspaceTabs.CloneTiddlyWebWiki;
   const [isCreateMainWorkspace, isCreateMainWorkspaceSetter] = useState(true);
   const [useTidgiConfig, useTidgiConfigSetter] = useState(true);
+  const [tiddlywebForm, tiddlywebFormSetter] = useState<ITiddlyWebWikiFormValues>({
+    url: '',
+    recipe: 'default',
+    username: '',
+    password: '',
+  });
   const form = useWikiWorkspaceForm();
   const [errorInWhichComponent, errorInWhichComponentSetter] = useState<IErrorInWhichComponent>({});
   const workspaceList = usePromiseValue(async () => await window.service.workspace.getWorkspacesAsList());
@@ -133,6 +142,7 @@ export default function AddWorkspace(): React.JSX.Element {
           >
             <Tab label={t('AddWorkspace.CreateNewWiki')} value={CreateWorkspaceTabs.CreateNewWiki} />
             <Tab label={t(`AddWorkspace.CloneOnlineWiki`)} value={CreateWorkspaceTabs.CloneOnlineWiki} />
+            <Tab label={t('AddWorkspace.CloneTiddlyWebWiki')} value={CreateWorkspaceTabs.CloneTiddlyWebWiki} />
             <Tab label={t('AddWorkspace.OpenLocalWiki')} value={CreateWorkspaceTabs.OpenLocalWiki} />
             <Tab label={t('AddWorkspace.OpenLocalWikiFromHTML')} value={CreateWorkspaceTabs.OpenLocalWikiFromHtml} />
           </Tabs>
@@ -149,12 +159,14 @@ export default function AddWorkspace(): React.JSX.Element {
         </AccordionDetails>
       </Accordion>
 
-      {isCreateSyncedWorkspace && (
+      {isCreateSyncedWorkspace && !isCloneTiddlyWeb && (
         <TokenFormContainer>
           <TokenForm storageProvider={storageProvider} storageProviderSetter={storageProviderSetter} />
         </TokenFormContainer>
       )}
-      {storageProvider !== SupportedStorageServices.local && <GitRepoUrlForm error={errorInWhichComponent.gitRepoUrl} {...formProps} {...formProps.form} />}
+      {storageProvider !== SupportedStorageServices.local && !isCloneTiddlyWeb && (
+        <GitRepoUrlForm error={errorInWhichComponent.gitRepoUrl} {...formProps} {...formProps.form} />
+      )}
 
       {(currentTab === CreateWorkspaceTabs.CloneOnlineWiki || currentTab === CreateWorkspaceTabs.OpenLocalWiki) && (
         <TidgiConfigImportOptions>
@@ -186,6 +198,18 @@ export default function AddWorkspace(): React.JSX.Element {
           <Container>
             <CloneWikiForm {...formProps} />
             <CloneWikiDoneButton {...formProps} useTidgiConfig={useTidgiConfig} />
+          </Container>
+        </TabPanel>
+      )}
+      {currentTab === CreateWorkspaceTabs.CloneTiddlyWebWiki && (
+        <TabPanel>
+          <Container>
+            <TiddlyWebWikiForm
+              {...formProps}
+              tiddlywebForm={tiddlywebForm}
+              tiddlywebFormSetter={tiddlywebFormSetter}
+            />
+            <TiddlyWebWikiDoneButton {...formProps} tiddlywebForm={tiddlywebForm} />
           </Container>
         </TabPanel>
       )}

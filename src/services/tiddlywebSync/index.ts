@@ -60,6 +60,16 @@ const CONFLICT_BACKUP_PREFIX = '$:/sync/conflicts/';
 const EXCLUDE_FILTER_TEMP_TITLE = '$:/temp/tidgi/tiddlyweb-sync-exclude';
 
 /**
+ * Maximum number of actions to process concurrently. The TiddlyWiki NodeJS
+ * server is comfortable with modest parallelism (it serialises writes to the
+ * same tiddler internally), and the local wiki worker serialises its own IPC
+ * anyway — so raising this from 1 mostly wins on HTTP round-trip latency.
+ * 8 keeps a fresh-clone-of-20k-tiddlers pass under a few minutes without
+ * noticeably stressing the server.
+ */
+const APPLY_CONCURRENCY = 8;
+
+/**
  * Convert a raw tiddler fields object (as returned by TW's `getTiddler().fields`)
  * to the wire format. Two normalisations:
  *   - `tags` array → TW string format `[[tag with space]] tag2 tag3`.
@@ -230,29 +240,59 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
       progress.next({ phase: 'reconciled', workspaceId, summary });
       logger.info('TiddlyWebSync: reconciled', { workspaceId, summary });
 
-      // ── 4. Apply actions ──────────────────────────────────────────────
+      // ── 4. Apply actions (bounded concurrency) ───────────────────────
+      // Safety: each action operates on a distinct tiddler title, so the
+      // shared store / localFieldsByTitle / progress subject are all
+      // concurrency-safe under JS's single-threaded event loop.
+      // Checkpoint state every 500 actions so a mid-sync crash doesn't throw
+      // away hours of work on a 20k-tiddler first pass.
+      const CHECKPOINT_EVERY = 500;
       const errors: TiddlyWebSyncResult['errors'] = [];
       let completed = 0;
-      for (const action of actions) {
-        progress.next({
-          phase: 'applying',
-          workspaceId,
-          completed,
-          total: actions.length,
-          currentTitle: 'title' in action ? action.title : undefined,
-        });
-        try {
-          await this.applyAction(action, workspaceId, client, store, localFieldsByTitle, wikiService);
-        } catch (error) {
-          const message = (error as Error).message ?? String(error);
-          errors.push({
-            title: 'title' in action ? action.title : '',
-            action: action.type,
-            message,
+      let nextIndex = 0;
+      let lastCheckpoint = 0;
+      let checkpointInFlight: Promise<void> | undefined;
+      const workerCount = Math.min(APPLY_CONCURRENCY, actions.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (true) {
+          const idx = nextIndex++;
+          if (idx >= actions.length) return;
+          const action = actions[idx];
+          // Emit progress BEFORE work, so "applying N/total" reflects next item.
+          progress.next({
+            phase: 'applying',
+            workspaceId,
+            completed,
+            total: actions.length,
+            currentTitle: 'title' in action ? action.title : undefined,
           });
-          logger.error('TiddlyWebSync: action failed', { workspaceId, action, error });
+          try {
+            await this.applyAction(action, workspaceId, client, store, localFieldsByTitle, wikiService);
+          } catch (error) {
+            const message = (error as Error).message ?? String(error);
+            errors.push({
+              title: 'title' in action ? action.title : '',
+              action: action.type,
+              message,
+            });
+            logger.error('TiddlyWebSync: action failed', { workspaceId, action, error });
+          }
+          completed += 1;
+          if (completed - lastCheckpoint >= CHECKPOINT_EVERY && checkpointInFlight === undefined) {
+            lastCheckpoint = completed;
+            checkpointInFlight = store.save().catch((error) => {
+              logger.warn('TiddlyWebSync: checkpoint save failed', { workspaceId, error });
+            }).finally(() => {
+              checkpointInFlight = undefined;
+            });
+          }
         }
-        completed += 1;
+      });
+      await Promise.all(workers);
+      // Make sure any in-flight checkpoint finishes before we move to the
+      // final save, to avoid overlapping disk writes.
+      if (checkpointInFlight) {
+        await checkpointInFlight;
       }
 
       // ── 5. Persist state ──────────────────────────────────────────────

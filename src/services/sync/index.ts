@@ -177,6 +177,14 @@ export class Sync implements ISyncService {
       const intervalMs = workspace.tiddlywebSyncIntervalMs && workspace.tiddlywebSyncIntervalMs > 0
         ? workspace.tiddlywebSyncIntervalMs
         : 30_000;
+      // Fire an immediate first sync. For freshly-cloned workspaces this is
+      // what pulls the remote content in — otherwise the user would stare at
+      // an empty wiki for up to `intervalMs` waiting for the first tick.
+      // The per-workspace mutex in TiddlyWebSync coalesces concurrent calls,
+      // so racing with an explicit "sync now" or the AddWorkspace kick is fine.
+      void this.syncWikiIfNeeded(workspace).catch((error) => {
+        logger.error('TiddlyWeb initial sync failed', { workspaceId: id, error });
+      });
       this.wikiSyncIntervals[id] = setInterval(async () => {
         await this.syncWikiIfNeeded(workspace);
       }, intervalMs);

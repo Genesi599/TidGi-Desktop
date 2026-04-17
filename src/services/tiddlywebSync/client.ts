@@ -109,13 +109,32 @@ export class TiddlyWebClient {
     if (!response.ok) {
       throw new TiddlyWebHttpError(response.status, url, await response.text());
     }
-    const data = (await response.json()) as Array<Partial<TiddlerSummary> & { title?: string; revision?: string }>;
+    const data = (await response.json()) as Array<{
+      title?: unknown;
+      revision?: unknown;
+      bag?: unknown;
+      modified?: unknown;
+    }>;
     if (!Array.isArray(data)) {
       throw new Error(`listAll: expected array, got ${typeof data}`);
     }
-    return data
-      .filter((t): t is TiddlerSummary => typeof t.title === 'string' && typeof t.revision === 'string')
-      .map((t) => ({ title: t.title, revision: String(t.revision), bag: t.bag, modified: t.modified }));
+    // TW server sends revision as a NUMBER for tiddlers loaded from disk (where
+    // .tid files don't carry a server revision yet — it defaults to 0) and as
+    // a STRING for tiddlers that have been edited through the HTTP API. Accept
+    // both and normalise to string downstream.
+    const result: TiddlerSummary[] = [];
+    for (const t of data) {
+      if (typeof t.title !== 'string') continue;
+      if (t.revision === undefined || t.revision === null) continue;
+      if (typeof t.revision !== 'string' && typeof t.revision !== 'number') continue;
+      result.push({
+        title: t.title,
+        revision: String(t.revision),
+        bag: typeof t.bag === 'string' ? t.bag : undefined,
+        modified: typeof t.modified === 'string' ? t.modified : undefined,
+      });
+    }
+    return result;
   }
 
   /**

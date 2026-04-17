@@ -79,14 +79,18 @@ export class WikiGitWorkspace implements IWikiGitWorkspaceService {
     try {
       const previousActiveId = workspaceService.getActiveWorkspaceSync()?.id;
       await workspaceService.setActiveWorkspace(newWorkspace.id, previousActiveId);
-      const isSyncedWiki = storageService !== SupportedStorageServices.local;
+      // From git's perspective, tiddlyweb is local-only: its sync runs over
+      // the TiddlyWeb HTTP API, not git. We only take the "remote git" branch
+      // for actual git-backed providers (github/gitlab/codeberg/gitea/testOAuth).
+      const isSyncedViaGit = storageService !== SupportedStorageServices.local
+        && storageService !== SupportedStorageServices.tiddlyweb;
       if (await hasGit(wikiFolderLocation)) {
         logger.warn('Skip git init because it already has a git setup.', { wikiFolderLocation });
       } else {
-        if (isSyncedWiki) {
+        if (isSyncedViaGit) {
           if (typeof gitUrl === 'string' && userInfo !== undefined) {
             const gitService = container.get<IGitService>(serviceIdentifier.Git);
-            await gitService.initWikiGit(wikiFolderLocation, isSyncedWiki, !isSubWiki, gitUrl, userInfo);
+            await gitService.initWikiGit(wikiFolderLocation, isSyncedViaGit, !isSubWiki, gitUrl, userInfo);
             const authService = container.get<IAuthenticationService>(serviceIdentifier.Authentication);
             const branch = await authService.get(`${storageService}-branch`);
             if (branch !== undefined) {
