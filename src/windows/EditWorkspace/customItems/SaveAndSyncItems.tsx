@@ -1,4 +1,4 @@
-import { Button, Tooltip } from '@mui/material';
+import { Button, MenuItem, Tooltip } from '@mui/material';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -10,6 +10,16 @@ import { SyncedWikiDescription } from '../../AddWorkspace/Description';
 import { GitRepoUrlForm } from '../../AddWorkspace/GitRepoUrlForm';
 import { ListItemVertical, TextField } from '../../Preferences/PreferenceComponents';
 import { useWorkspaceForm } from '../WorkspaceFormContext';
+
+/** Providers offered when the workspace is in "synced" mode. */
+const SYNCED_PROVIDER_OPTIONS: ReadonlyArray<{ value: SupportedStorageServices; label: string }> = [
+  { value: SupportedStorageServices.github, label: 'GitHub' },
+  { value: SupportedStorageServices.gitlab, label: 'GitLab' },
+  { value: SupportedStorageServices.codeberg, label: 'Codeberg' },
+  { value: SupportedStorageServices.gitea, label: 'Gitea' },
+  { value: SupportedStorageServices.tiddlyweb, label: 'TiddlyWiki NodeJS Server' },
+  { value: SupportedStorageServices.testOAuth, label: 'Custom OAuth' },
+];
 
 export function WorkspacePathItem(): React.JSX.Element {
   const { t } = useTranslation();
@@ -70,11 +80,44 @@ export function StorageServiceSwitchItem(): React.JSX.Element | null {
   );
 }
 
-export function TokenFormItem(): React.JSX.Element | null {
+/** Dropdown to pick the sync backend. Only visible when not local. */
+export function StorageProviderSelectItem(): React.JSX.Element | null {
+  const { t } = useTranslation();
   const { workspace, workspaceSetter } = useWorkspaceForm();
   if (!isWikiWorkspace(workspace)) return null;
   const storageService = workspace.storageService ?? wikiWorkspaceDefaultValues.storageService;
   if (storageService === SupportedStorageServices.local) return null;
+  return (
+    <ListItem>
+      <ListItemText
+        primary={t('EditWorkspace.StorageProvider')}
+        secondary={t('EditWorkspace.StorageProviderDescription')}
+      />
+      <TextField
+        select
+        size='small'
+        value={storageService}
+        onChange={(event) => {
+          workspaceSetter({ ...workspace, storageService: event.target.value as SupportedStorageServices });
+        }}
+        sx={{ minWidth: 220 }}
+        data-testid='storage-provider-select'
+      >
+        {SYNCED_PROVIDER_OPTIONS.map(({ value, label }) => (
+          <MenuItem key={value} value={value}>{label}</MenuItem>
+        ))}
+      </TextField>
+    </ListItem>
+  );
+}
+
+export function TokenFormItem(): React.JSX.Element | null {
+  const { workspace, workspaceSetter } = useWorkspaceForm();
+  if (!isWikiWorkspace(workspace)) return null;
+  const storageService = workspace.storageService ?? wikiWorkspaceDefaultValues.storageService;
+  // TokenForm is git-provider specific (github/gitlab/gitea/codeberg/testOAuth).
+  // Hide for local and for tiddlyweb (which uses its own keychain entry).
+  if (storageService === SupportedStorageServices.local || storageService === SupportedStorageServices.tiddlyweb) return null;
   return (
     <ListItem>
       <TokenForm
@@ -91,7 +134,8 @@ export function GitRepoUrlItem(): React.JSX.Element | null {
   const { workspace, workspaceSetter } = useWorkspaceForm();
   if (!isWikiWorkspace(workspace)) return null;
   const storageService = workspace.storageService ?? wikiWorkspaceDefaultValues.storageService;
-  if (storageService === SupportedStorageServices.local) return null;
+  // Git repo URL is irrelevant for local and tiddlyweb workspaces.
+  if (storageService === SupportedStorageServices.local || storageService === SupportedStorageServices.tiddlyweb) return null;
   return (
     <ListItem>
       <GitRepoUrlForm

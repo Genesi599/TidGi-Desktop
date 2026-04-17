@@ -33,8 +33,35 @@
     "storageService": {
       "type": "string",
       "description": "Storage service type for syncing",
-      "enum": ["local", "github", "gitlab"],
+      "enum": ["local", "github", "gitlab", "gitee", "gitea", "codeberg", "solid", "testOAuth", "tiddlyweb"],
       "default": "local"
+    },
+    "tiddlywebUrl": {
+      "type": ["string", "null"],
+      "description": "Base URL of a remote TiddlyWiki NodeJS server (used when storageService is 'tiddlyweb'). No trailing slash.",
+      "format": "uri",
+      "default": null
+    },
+    "tiddlywebRecipe": {
+      "type": "string",
+      "description": "TiddlyWeb recipe name to sync against. Default TW server install uses 'default'.",
+      "default": "default"
+    },
+    "tiddlywebUsername": {
+      "type": "string",
+      "description": "Basic auth username for the TiddlyWeb server. Empty string means unauthenticated.",
+      "default": ""
+    },
+    "tiddlywebSyncIntervalMs": {
+      "type": "number",
+      "description": "Interval in milliseconds between automatic TiddlyWeb sync passes.",
+      "minimum": 1000,
+      "default": 30000
+    },
+    "tiddlywebExcludeFilter": {
+      "type": "string",
+      "description": "TiddlyWiki filter expression. Tiddlers matching this filter are NOT synced with the TiddlyWeb server. Default excludes all system tiddlers ($:/...).",
+      "default": "[prefix[$:/]]"
     },
     "userName": {
       "type": "string",

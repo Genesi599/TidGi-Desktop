@@ -26,6 +26,11 @@ export const saveAndSyncSection: IGenericSectionDefinition = {
     },
     {
       type: 'custom',
+      componentId: 'workspace.storageProviderSelect',
+      titleKey: 'EditWorkspace.StorageProvider',
+    },
+    {
+      type: 'custom',
       componentId: 'workspace.tokenForm',
       titleKey: 'AddWorkspace.LoginToStorageProvider',
     },
@@ -33,6 +38,11 @@ export const saveAndSyncSection: IGenericSectionDefinition = {
       type: 'custom',
       componentId: 'workspace.gitRepoUrl',
       titleKey: 'AddWorkspace.GitRepoUrl',
+    },
+    {
+      type: 'custom',
+      componentId: 'workspace.tiddlywebConfig',
+      titleKey: 'EditWorkspace.TiddlyWebConfig',
     },
     {
       type: 'preference-boolean',

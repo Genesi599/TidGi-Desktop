@@ -7,7 +7,8 @@ import { workspaceSectionById } from '@services/workspaces/definitions/registry'
 import type { ComponentType } from 'react';
 import { WorkspaceAvatarItem, WorkspaceNameItem } from './customItems/AppearanceItems';
 import { LastUrlItem } from './customItems/MiscItems';
-import { GitRepoUrlItem, StorageServiceSwitchItem, TokenFormItem, WorkspacePathItem } from './customItems/SaveAndSyncItems';
+import { GitRepoUrlItem, StorageProviderSelectItem, StorageServiceSwitchItem, TokenFormItem, WorkspacePathItem } from './customItems/SaveAndSyncItems';
+import { TiddlyWebConfigItem } from './customItems/TiddlyWebItems';
 import { ServerOptions } from './server';
 import { SubWorkspaceRouting } from './SubWorkspaceRouting';
 import { registerWorkspaceCustomComponent } from './workspaceCustomComponentRegistry';
@@ -33,7 +34,9 @@ export function registerWorkspaceCustomSections(): void {
   registerWorkspaceCustomComponent('workspace.avatar', WorkspaceAvatarItem);
   registerWorkspaceCustomComponent('workspace.path', WorkspacePathItem);
   registerWorkspaceCustomComponent('workspace.storageServiceSwitch', StorageServiceSwitchItem);
+  registerWorkspaceCustomComponent('workspace.storageProviderSelect', StorageProviderSelectItem);
   registerWorkspaceCustomComponent('workspace.tokenForm', TokenFormItem);
   registerWorkspaceCustomComponent('workspace.gitRepoUrl', GitRepoUrlItem);
+  registerWorkspaceCustomComponent('workspace.tiddlywebConfig', TiddlyWebConfigItem);
   registerWorkspaceCustomComponent('workspace.lastUrl', LastUrlItem);
 }

@@ -112,7 +112,8 @@ describe('TiddlyWebClient', () => {
 
   test('put: PUTs JSON without title/bag/revision in body, parses revision from etag', async () => {
     const { fetchImpl, calls } = makeFetch(() =>
-      new Response('', {
+      // 204 is a null-body status per spec — body must be null, not ''.
+      new Response(null, {
         status: 204,
         headers: { etag: '"default/MyTitle/42:abc"' },
       }),
@@ -135,14 +136,14 @@ describe('TiddlyWebClient', () => {
   });
 
   test('put: returns undefined revision when no etag header', async () => {
-    const { fetchImpl } = makeFetch(() => new Response('', { status: 204 }));
+    const { fetchImpl } = makeFetch(() => new Response(null, { status: 204 }));
     const client = new TiddlyWebClient({ baseUrl: 'https://w', recipe: 'r', fetchImpl });
     const result = await client.put({ title: 'X', text: 'y' });
     expect(result.revision).toBeUndefined();
   });
 
   test('delete: DELETEs to /bag/<bag>/tiddlers/<title> with bag fallback to recipe', async () => {
-    const { fetchImpl, calls } = makeFetch(() => new Response('', { status: 204 }));
+    const { fetchImpl, calls } = makeFetch(() => new Response(null, { status: 204 }));
     const client = new TiddlyWebClient({ baseUrl: 'https://w', recipe: 'myRecipe', fetchImpl });
     await client.delete('Foo');
     expect(calls[0].url).toBe('https://w/bag/myRecipe/tiddlers/Foo');

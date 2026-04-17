@@ -59,6 +59,46 @@ const CONFLICT_BACKUP_PREFIX = '$:/sync/conflicts/';
 /** Temporary tiddler that holds the user's exclude filter so we can use it via `subfilter{...}`. */
 const EXCLUDE_FILTER_TEMP_TITLE = '$:/temp/tidgi/tiddlyweb-sync-exclude';
 
+/**
+ * Convert a raw tiddler fields object (as returned by TW's `getTiddler().fields`)
+ * to the wire format. Two normalisations:
+ *   - `tags` array → TW string format `[[tag with space]] tag2 tag3`.
+ *   - Stringify any non-string scalar fields so the hash function and HTTP
+ *     body always see plain strings.
+ */
+function normaliseLocalFields(raw: Record<string, unknown>): TiddlerFields {
+  const out: TiddlerFields = { title: '' };
+  for (const [key, value] of Object.entries(raw)) {
+    if (value === undefined || value === null) continue;
+    if (key === 'tags' && Array.isArray(value)) {
+      out.tags = (value as string[])
+        .map((tag) => (tag.includes(' ') ? `[[${tag}]]` : tag))
+        .join(' ');
+    } else if (typeof value === 'string') {
+      out[key] = value;
+    } else if (value instanceof Date) {
+      // TW stores dates as YYYYMMDDHHMMSSmmm; if we get a Date object, format it.
+      out[key] = stringifyTwDate(value);
+    } else {
+      out[key] = String(value);
+    }
+  }
+  return out;
+}
+
+function stringifyTwDate(d: Date): string {
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+  return (
+    d.getUTCFullYear().toString().padStart(4, '0') +
+    pad(d.getUTCMonth() + 1) +
+    pad(d.getUTCDate()) +
+    pad(d.getUTCHours()) +
+    pad(d.getUTCMinutes()) +
+    pad(d.getUTCSeconds()) +
+    pad(d.getUTCMilliseconds(), 3)
+  );
+}
+
 @injectable()
 export class TiddlyWebSync implements ITiddlyWebSyncService {
   private readonly stateStores = new Map<string, TiddlyWebSyncStateStore>();
@@ -377,6 +417,12 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
    * We write the exclude expression to a temp tiddler and reference it via
    * `subfilter{...}`, because TW's filter operand `[]` syntax can't carry
    * arbitrary user input safely (closing brackets break it).
+   *
+   * The custom `getTiddlersAsJson` operation in TidGi returns raw `tiddler.fields`
+   * where `tags` is a JS array. The TiddlyWeb wire format uses a string of
+   * space-separated `[[tag]]` entries, and so does the rest of our pipeline
+   * (hash function, push body). We normalise here so downstream code only ever
+   * sees strings.
    */
   private async readLocalTiddlers(workspaceId: string, excludeFilter: string): Promise<TiddlerFields[]> {
     const wikiService = container.get<IWikiService>(serviceIdentifier.Wiki);
@@ -387,7 +433,7 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
     const filter = `[all[tiddlers]] -[subfilter{${EXCLUDE_FILTER_TEMP_TITLE}}]`;
     const result = await wikiService.wikiOperationInServer(WikiChannel.getTiddlersAsJson, workspaceId, [filter]);
     if (!Array.isArray(result)) return [];
-    return result as TiddlerFields[];
+    return (result as Array<Record<string, unknown>>).map((raw) => normaliseLocalFields(raw));
   }
 
   private async writeTiddlerLocally(fields: TiddlerFields, wikiService: IWikiService, workspaceId: string): Promise<void> {
