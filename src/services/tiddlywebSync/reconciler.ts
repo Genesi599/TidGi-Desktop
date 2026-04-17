@@ -24,6 +24,7 @@
  * | 0 | 1 | 1 | deleted locally, remote rev unchanged        | delete-remote           |
  * | 0 | 1 | 1 | deleted locally, remote rev changed          | pull (remote wins)      |
  * | 1 | 0 | 0 | new locally                                  | push                    |
+ * | 1 | 0 | 1 | snapshot orphan (S.fromSnapshot=true)        | (skip — out of scope)   |
  * | 1 | 0 | 1 | remote deleted, local unchanged              | delete-local            |
  * | 1 | 0 | 1 | remote deleted, local changed                | push (local wins)       |
  * | 1 | 1 | 0 | first sync, both exist                       | pull + backupLocal flag |
@@ -64,6 +65,30 @@ export interface SyncStateEntry {
   lastSyncedAt: number;
   /** Bag name reported by server, needed to construct DELETE URL. */
   bag?: string;
+  /**
+   * Set for entries that were seeded from an HTML-snapshot import before the
+   * first sync ever ran. Meaning differs depending on whether the server's
+   * `/tiddlers.json` listing confirms the title:
+   *
+   *   - **Confirmed** (server lists the title): `runSync`'s graduation loop
+   *     fills `lastSyncedLocalHash` from the live local store AND clears this
+   *     flag. The entry thereafter behaves like any normal synced entry — the
+   *     reconciler sees matching hash + matching revision and skips, avoiding
+   *     a redundant pull of a tiddler we already got from the snapshot.
+   *
+   *   - **Orphan** (server does NOT list the title): `runSync` still fills
+   *     `lastSyncedLocalHash` from local but LEAVES `fromSnapshot: true`. The
+   *     reconciler treats these as out-of-scope for sync (see the `L && !R &&
+   *     S.fromSnapshot` branch): neither delete-local nor push. This is the
+   *     common case for plugin shadows / system tiddlers / recipe-filtered
+   *     content — the server materialises them in-page but doesn't expose
+   *     them via HTTP, and we materialised them locally for visual fidelity.
+   *     Preserving this flag stops the reconciler from interpreting `L && !R
+   *     && S` as "remote was deleted" and wiping thousands of files on first
+   *     sync. If the server later starts listing the title, that sync's
+   *     graduation loop takes the "confirmed" branch and clears the flag.
+   */
+  fromSnapshot?: boolean;
 }
 
 /**
@@ -166,6 +191,22 @@ export function reconcile(input: ReconcileInput): SyncAction[] {
       if (!S) {
         // Brand-new local tiddler.
         actions.push({ type: 'push', title, localHash: L.hash });
+      } else if (S.fromSnapshot === true) {
+        // Snapshot orphan. HTML-snapshot seeded this state entry because the
+        // server's rendered page contained the tiddler, but the server's
+        // `/tiddlers.json` listing does not — almost always a plugin shadow
+        // or a recipe-filtered system tiddler that the server materialises
+        // in-page but won't round-trip over the TiddlyWeb HTTP API. Treat
+        // as out-of-scope for sync:
+        //   - No `delete-local`: the user imported this deliberately when
+        //     cloning, and wiping 18k plugin/system files on first sync
+        //     would revert the wiki to a blank template on next restart.
+        //   - No `push`: the server didn't offer this title, so the user
+        //     bag almost certainly isn't the intended destination.
+        // The entry stays in state with `fromSnapshot: true` so future
+        // syncs re-apply the same short-circuit. `runSync`'s graduation
+        // will clear the flag the moment the server starts listing it.
+        // (no action)
       } else if (L.hash === S.lastSyncedLocalHash) {
         // Remote was deleted, local hasn't changed → mirror the delete.
         actions.push({ type: 'delete-local', title });

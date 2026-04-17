@@ -67,6 +67,49 @@ describe('reconcile', () => {
     expect(actions).toEqual([{ type: 'push', title: 'A', localHash: 'h2' }]);
   });
 
+  // ── Snapshot orphans ────────────────────────────────────────────────────
+  // HTML-snapshot seeding populated sync state for a tiddler, but the
+  // server's /tiddlers.json never listed it (plugin shadow / system tiddler /
+  // recipe-filtered). Reconciler must NOT fire delete-local here — doing so
+  // would wipe ~18k snapshot-imported files on first sync and leave the
+  // local wiki as a blank template on restart.
+  test('local-only, snapshot orphan (S.fromSnapshot=true), hash matches → no action', () => {
+    const actions = reconcile({
+      local: local({ '$:/plugins/foo': 'h1' }),
+      remote: new Map(),
+      syncState: state({
+        '$:/plugins/foo': {
+          lastKnownRemoteRevision: 'r1',
+          lastSyncedLocalHash: 'h1',
+          lastSyncedAt: 1,
+          bag: 'plugins',
+          fromSnapshot: true,
+        },
+      }),
+    });
+    expect(actions).toEqual([]);
+  });
+
+  test('local-only, snapshot orphan (S.fromSnapshot=true), hash differs → still no action (out of sync scope)', () => {
+    // Even if the user later edits the shadow locally, we stay hands-off:
+    // pushing a plugin-shadow override into the user bag is not something
+    // we can infer intent for from a hash change alone.
+    const actions = reconcile({
+      local: local({ '$:/plugins/foo': 'h2' }),
+      remote: new Map(),
+      syncState: state({
+        '$:/plugins/foo': {
+          lastKnownRemoteRevision: 'r1',
+          lastSyncedLocalHash: 'h1',
+          lastSyncedAt: 1,
+          bag: 'plugins',
+          fromSnapshot: true,
+        },
+      }),
+    });
+    expect(actions).toEqual([]);
+  });
+
   test('remote-only, with state, remote rev unchanged → delete-remote', () => {
     const actions = reconcile({
       local: new Map(),

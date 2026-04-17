@@ -25,11 +25,22 @@ vi.mock('react-i18next', () => ({
 // the existing Window object. We augment it instead.
 const authSet = vi.fn<(key: string, value: string) => Promise<void>>().mockResolvedValue(undefined);
 const pickDirectory = vi.fn<(start?: string) => Promise<string[]>>().mockResolvedValue([]);
+// testServerAdHoc lives on window.service.tiddlyWebSync — the form delegates
+// its "Test Connection" button to the main-process service (bypassing
+// renderer CORS, which breaks direct fetch against most TW servers).
+const testServerAdHoc = vi.fn<(
+  url: string,
+  recipe: string,
+  username: string,
+  password: string,
+) => Promise<{ reachable: boolean; serverInfo?: { tiddlywikiVersion?: string; username?: string }; error?: string }>>()
+  .mockResolvedValue({ reachable: true, serverInfo: { tiddlywikiVersion: '5.3.3', username: 'me' } });
 
 Object.assign(window as unknown as Record<string, unknown>, {
   service: {
     auth: { set: authSet },
     native: { pickDirectory },
+    tiddlyWebSync: { testServerAdHoc },
   },
 });
 
@@ -91,9 +102,10 @@ describe('TiddlyWebWikiForm', () => {
     vi.clearAllMocks();
     authSet.mockResolvedValue(undefined);
     pickDirectory.mockResolvedValue([]);
-    // Reset fetch mock for each test
-    // Some suites may not have fetch in jsdom; stub it.
-    (globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn();
+    testServerAdHoc.mockResolvedValue({
+      reachable: true,
+      serverInfo: { tiddlywikiVersion: '5.3.3', username: 'me' },
+    });
   });
 
   it('renders URL / recipe / username / password fields and the test button', () => {
@@ -123,15 +135,8 @@ describe('TiddlyWebWikiForm', () => {
     expect(urlInputs.length).toBeGreaterThan(0);
   });
 
-  it('Test Connection strips trailing slash, adds Basic auth, and persists password to keychain', async () => {
+  it('Test Connection delegates to main-process service (bypasses renderer CORS) and saves password to keychain', async () => {
     const user = userEvent.setup();
-    const mockFetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ tiddlywiki_version: '5.3.3', username: 'me' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    );
-    (globalThis as unknown as { fetch: typeof fetch }).fetch = mockFetch as unknown as typeof fetch;
 
     render(
       <Harness
@@ -142,59 +147,51 @@ describe('TiddlyWebWikiForm', () => {
 
     await user.click(screen.getByTestId('tiddlyweb-clone-test-button'));
 
-    // Assert the fetch happened with the right shape.
-    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
-    const [calledUrl, init] = mockFetch.mock.calls[0] as [string, RequestInit];
-    // Trailing slash on baseUrl must be stripped
-    expect(calledUrl).toBe('http://wiki.example.com:8080/status');
-    // Basic auth: base64("me:sekret") == "bWU6c2VrcmV0"
-    expect((init.headers as Record<string, string>).Authorization).toBe('Basic bWU6c2VrcmV0');
-    expect((init.headers as Record<string, string>).Accept).toBe('application/json');
-
-    // Password is persisted to keychain before the HTTP call
-    expect(authSet).toHaveBeenCalledWith('tiddlyweb-token', 'sekret');
-
-    // Success alert appears (looks for the i18n key with interpolated args)
+    // Password is persisted to keychain before the call (so the main-process
+    // service + later the sync worker all read the same value).
+    await waitFor(() => {
+      expect(authSet).toHaveBeenCalledWith('tiddlyweb-token', 'sekret');
+    });
+    // Service is called with the raw form values; trailing-slash / auth
+    // normalisation happens in the main process, not the form.
+    expect(testServerAdHoc).toHaveBeenCalledTimes(1);
+    expect(testServerAdHoc).toHaveBeenCalledWith(
+      'http://wiki.example.com:8080/',
+      'default',
+      'me',
+      'sekret',
+    );
     await waitFor(() => {
       expect(screen.getByText(/AddWorkspace\.TiddlyWebCloneTestOK/)).toBeInTheDocument();
     });
   });
 
-  it('Test Connection omits Authorization header when username is empty', async () => {
+  it('Test Connection passes empty username/password through (no client-side branching)', async () => {
     const user = userEvent.setup();
-    const mockFetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ tiddlywiki_version: '5.3.3' }), { status: 200 }),
-    );
-    (globalThis as unknown as { fetch: typeof fetch }).fetch = mockFetch as unknown as typeof fetch;
-
     render(
       <Harness form={makeForm()} initial={{ url: 'http://w', recipe: 'default', username: '', password: '' }} />,
     );
     await user.click(screen.getByTestId('tiddlyweb-clone-test-button'));
 
-    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
-    const init = mockFetch.mock.calls[0][1] as RequestInit;
-    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+    await waitFor(() => expect(testServerAdHoc).toHaveBeenCalledTimes(1));
+    expect(testServerAdHoc).toHaveBeenCalledWith('http://w', 'default', '', '');
   });
 
-  it('Test Connection shows failure alert on non-2xx', async () => {
+  it('Test Connection shows failure alert when service reports unreachable', async () => {
     const user = userEvent.setup();
-    const mockFetch = vi.fn().mockResolvedValue(new Response('Unauthorized', { status: 401, statusText: 'Unauthorized' }));
-    (globalThis as unknown as { fetch: typeof fetch }).fetch = mockFetch as unknown as typeof fetch;
+    testServerAdHoc.mockResolvedValueOnce({ reachable: false, error: 'HTTP 401 Unauthorized' });
 
     render(<Harness form={makeForm()} initial={{ url: 'http://w', recipe: 'default', username: 'x', password: 'bad' }} />);
     await user.click(screen.getByTestId('tiddlyweb-clone-test-button'));
 
     await waitFor(() => {
-      // Failure message contains the interpolated error string
       expect(screen.getByText(/AddWorkspace\.TiddlyWebCloneTestFailed/)).toBeInTheDocument();
     });
   });
 
-  it('Test Connection shows failure alert on network error', async () => {
+  it('Test Connection shows failure alert on service exception', async () => {
     const user = userEvent.setup();
-    const mockFetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-    (globalThis as unknown as { fetch: typeof fetch }).fetch = mockFetch as unknown as typeof fetch;
+    testServerAdHoc.mockRejectedValueOnce(new Error('ECONNREFUSED'));
 
     render(<Harness form={makeForm()} initial={{ url: 'http://w', recipe: 'default', username: '', password: '' }} />);
     await user.click(screen.getByTestId('tiddlyweb-clone-test-button'));

@@ -26,6 +26,12 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ListItemText } from '@/components/ListItem';
+import {
+  FILTER_PRESET_CONTENT_AND_SETTINGS,
+  FILTER_PRESET_CONTENT_ONLY,
+  FILTER_PRESET_CONTENT_SETTINGS_AND_PLUGINS,
+  FILTER_PRESET_FULL_MIRROR,
+} from '@services/tiddlywebSync/filterPresets';
 import type {
   TiddlyWebSyncProgressEvent,
   TiddlyWebSyncStatus,
@@ -45,40 +51,19 @@ const IN_FLIGHT_PHASES: ReadonlySet<TiddlyWebSyncProgressEvent['phase']> = new S
 ]);
 
 /**
- * One-click presets for the exclude filter. Each entry's `value` is the exact
- * filter string we'll write to the workspace; `labelKey` / `descriptionKey`
- * are i18n keys rendered as the chip label / tooltip.
- *
- * - contentOnly: safest default — skip ALL system tiddlers. This is the
- *   original TidGi default and works even against third-party TW servers.
- * - contentAndSettings: sync user-customised system tiddlers (site title,
- *   palette, custom CSS) but NOT plugin / theme / language bodies. Recommended
- *   when both sides run different TW versions.
- * - fullMirror: only skip transient UI state. Everything else — including
- *   any system tiddler the server exposes — gets synced. True "mirror" semantics.
- *   `$:/sync/` is always excluded to avoid syncing our own conflict backups.
+ * One-click presets for the exclude filter. Canonical filter values live in
+ * `services/tiddlywebSync/filterPresets.ts` — referenced here and from the
+ * clone-from-server workflow to avoid silent drift.
  */
 const FILTER_PRESETS: ReadonlyArray<{
-  id: 'contentOnly' | 'contentAndSettings' | 'fullMirror';
+  id: 'contentOnly' | 'contentAndSettings' | 'contentSettingsAndPlugins' | 'fullMirror';
   value: string;
   labelKey: string;
 }> = [
-  {
-    id: 'contentOnly',
-    value: '[prefix[$:/]]',
-    labelKey: 'EditWorkspace.TiddlyWebFilterPresetContentOnly',
-  },
-  {
-    id: 'contentAndSettings',
-    value:
-      '[prefix[$:/temp/]] [prefix[$:/state/]] [prefix[$:/HistoryList]] [prefix[$:/plugins/]] [prefix[$:/themes/]] [prefix[$:/languages/]] [prefix[$:/boot/]] [prefix[$:/core]] [prefix[$:/sync/]]',
-    labelKey: 'EditWorkspace.TiddlyWebFilterPresetContentAndSettings',
-  },
-  {
-    id: 'fullMirror',
-    value: '[prefix[$:/temp/]] [prefix[$:/state/]] [prefix[$:/HistoryList]] [prefix[$:/sync/]]',
-    labelKey: 'EditWorkspace.TiddlyWebFilterPresetFullMirror',
-  },
+  { id: 'contentOnly', value: FILTER_PRESET_CONTENT_ONLY, labelKey: 'EditWorkspace.TiddlyWebFilterPresetContentOnly' },
+  { id: 'contentAndSettings', value: FILTER_PRESET_CONTENT_AND_SETTINGS, labelKey: 'EditWorkspace.TiddlyWebFilterPresetContentAndSettings' },
+  { id: 'contentSettingsAndPlugins', value: FILTER_PRESET_CONTENT_SETTINGS_AND_PLUGINS, labelKey: 'EditWorkspace.TiddlyWebFilterPresetContentSettingsAndPlugins' },
+  { id: 'fullMirror', value: FILTER_PRESET_FULL_MIRROR, labelKey: 'EditWorkspace.TiddlyWebFilterPresetFullMirror' },
 ];
 
 export function TiddlyWebConfigItem(): React.JSX.Element | null {
@@ -199,6 +184,16 @@ export function TiddlyWebConfigItem(): React.JSX.Element | null {
   const handleReset = async () => {
     if (!window.confirm(t('EditWorkspace.TiddlyWebResetConfirm'))) return;
     await window.service.tiddlyWebSync.resetSyncState(workspace.id);
+    refreshStatus();
+  };
+
+  const handleCleanupBackups = async () => {
+    if (!window.confirm(t('EditWorkspace.TiddlyWebCleanupBackupsConfirm'))) return;
+    const { deleted } = await window.service.tiddlyWebSync.cleanupConflictBackups(workspace.id);
+    setTestResult({
+      ok: true,
+      message: t('EditWorkspace.TiddlyWebCleanupBackupsDone', { count: deleted }),
+    });
     refreshStatus();
   };
 
@@ -350,6 +345,18 @@ export function TiddlyWebConfigItem(): React.JSX.Element | null {
           data-testid='tiddlyweb-reset-button'
         >
           {t('EditWorkspace.TiddlyWebResetState')}
+        </Button>
+        <Button
+          variant='outlined'
+          size='small'
+          color='warning'
+          disabled={isBusy}
+          onClick={() => {
+            void handleCleanupBackups();
+          }}
+          data-testid='tiddlyweb-cleanup-backups-button'
+        >
+          {t('EditWorkspace.TiddlyWebCleanupBackups')}
         </Button>
       </Stack>
 

@@ -3,7 +3,8 @@ import { createWorkerProxy, terminateWorker } from '@services/libs/workerAdapter
 import { dialog, shell } from 'electron';
 import { attachWorker } from 'electron-ipc-cat/server';
 import { backOff } from 'exponential-backoff';
-import { copy, emptyDir, exists, mkdir, mkdirs, pathExists, readdir, readFile } from 'fs-extra';
+import { copy, emptyDir, exists, mkdir, mkdirs, pathExists, readdir, readFile, remove, writeFile } from 'fs-extra';
+import os from 'os';
 import { inject, injectable } from 'inversify';
 import path from 'path';
 import { Worker } from 'worker_threads';
@@ -30,6 +31,7 @@ import { Observable } from 'rxjs';
 import { AlreadyExistError, CopyWikiTemplateError, DoubleWikiInstanceError, HTMLCanNotLoadError, SubWikiSMainWikiNotExistError, WikiRuntimeError } from './error';
 import type { IWikiService, IWorkerInfo } from './interface';
 import { WikiControlActions } from './interface';
+import { extractSeedEntriesFromFile } from './snapshotSeedExtractor';
 import type { IStartNodeJSWikiConfigs, WikiWorker } from './wikiWorker';
 import type { IpcServerRouteMethods, IpcServerRouteNames, ITidGiChangedTiddlers } from './wikiWorker/ipcServerRoutes';
 
@@ -79,6 +81,123 @@ export class Wiki implements IWikiService {
     }
     logger.info('Emptying tiddlers/ folder for clean clone', { tiddlersDir });
     await emptyDir(tiddlersDir);
+  }
+
+  /**
+   * Download a remote TiddlyWiki HTML snapshot (typically the root page of a
+   * TW NodeJS server, e.g. `https://wiki.example.com/`) and extract its
+   * embedded tiddlers into the given wiki folder's `tiddlers/` directory.
+   *
+   * Context: the TiddlyWeb REST API (`/recipes/{recipe}/tiddlers.json`) only
+   * returns user-bag tiddlers, NOT plugin shadows — so a fresh clone over
+   * HTTP gives the user's content but none of the plugin/theme bodies that
+   * make the wiki look and feel right. The server's root HTML, in contrast,
+   * embeds ALL tiddlers including plugin bodies (with their shadows packed
+   * inside each plugin tiddler's JSON text). Importing from that HTML is
+   * how we get the full visual snapshot.
+   *
+   * Implementation: download to a temp file, reuse the existing
+   * `extractWikiHTML` (which spawns a fresh wiki worker that boots TW and
+   * dumps every tiddler to disk as a `.tid` / `.json` file), then move the
+   * extracted tiddlers into the destination. The extracted `tiddlywiki.info`
+   * and other scaffolding is discarded — the destination keeps its TidGi
+   * template's `tiddlywiki.info` which contains the `linonetwo/tidgi-*`
+   * plugin references that TidGi needs to function.
+   *
+   * Non-fatal: if the download or extract fails, returns `{ imported: 0,
+   * errorMessage }`. Caller should continue with HTTP-only sync.
+   */
+  public async importTiddlersFromHtmlUrl(
+    wikiFolderLocation: string,
+    url: string,
+    username = '',
+    password = '',
+  ): Promise<{
+    imported: number;
+    errorMessage?: string;
+    seedEntries?: Array<{ title: string; revision: string; bag?: string }>;
+  }> {
+    const headers: Record<string, string> = { Accept: 'text/html' };
+    if (username.length > 0 || password.length > 0) {
+      const token = Buffer.from(`${username}:${password}`, 'utf8').toString('base64');
+      headers.Authorization = `Basic ${token}`;
+    }
+    let html: string;
+    try {
+      const response = await fetch(url, { headers });
+      if (!response.ok) {
+        return { imported: 0, errorMessage: `HTTP ${response.status} ${response.statusText}` };
+      }
+      html = await response.text();
+    } catch (error) {
+      return { imported: 0, errorMessage: (error as Error).message };
+    }
+    if (html.length === 0 || !html.includes('<html')) {
+      return { imported: 0, errorMessage: 'Server root did not return a TiddlyWiki HTML page.' };
+    }
+
+    const tempRoot = path.join(os.tmpdir(), `tidgi-html-snapshot-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    const tempHtml = path.join(tempRoot, 'index.html');
+    const tempExtracted = path.join(tempRoot, 'extracted');
+    try {
+      await mkdir(tempRoot, { recursive: true });
+      await writeFile(tempHtml, html, 'utf8');
+      const extractError = await this.extractWikiHTML(tempHtml, tempExtracted);
+      if (typeof extractError === 'string') {
+        return { imported: 0, errorMessage: extractError };
+      }
+      const sourceTiddlers = path.join(tempExtracted, 'tiddlers');
+      if (!(await pathExists(sourceTiddlers))) {
+        return { imported: 0, errorMessage: 'Extracted wiki has no tiddlers/ folder.' };
+      }
+      const destTiddlers = path.join(wikiFolderLocation, 'tiddlers');
+      await mkdirs(destTiddlers);
+      const entries = await readdir(sourceTiddlers);
+      let imported = 0;
+      // Collect `(title, revision, bag)` triples as we go so the caller can
+      // pre-seed TiddlyWebSync's state store. Parsing happens on the same
+      // file we're about to copy — the buffer's already in the tmpfs cache —
+      // so the per-tiddler cost is a single read + a lightweight text scan.
+      // Failures here are swallowed; seeding is a best-effort optimisation,
+      // not a correctness requirement.
+      const seedEntries: Array<{ title: string; revision: string; bag?: string }> = [];
+      for (const entry of entries) {
+        const sourcePath = path.join(sourceTiddlers, entry);
+        try {
+          await copy(sourcePath, path.join(destTiddlers, entry), { overwrite: true });
+          imported += 1;
+        } catch (error) {
+          logger.warn('importTiddlersFromHtmlUrl: failed to copy entry', { entry, error });
+          continue;
+        }
+        try {
+          // Only attempt to parse files we know how to seed from; skip
+          // anything else (subdirectories, .meta sidecars, etc.) silently.
+          const lower = entry.toLowerCase();
+          if (!lower.endsWith('.tid') && !lower.endsWith('.json')) continue;
+          const content = await readFile(sourcePath, 'utf8');
+          const extracted = extractSeedEntriesFromFile(entry, content);
+          if (extracted.length > 0) seedEntries.push(...extracted);
+        } catch (error) {
+          logger.debug('importTiddlersFromHtmlUrl: seed parse failed for entry', { entry, error });
+        }
+      }
+      logger.info('importTiddlersFromHtmlUrl: completed', {
+        url,
+        imported,
+        seedEntries: seedEntries.length,
+      });
+      return { imported, seedEntries: seedEntries.length > 0 ? seedEntries : undefined };
+    } catch (error) {
+      return { imported: 0, errorMessage: (error as Error).message };
+    } finally {
+      // Best-effort cleanup; don't fail the whole operation on tmp cleanup issues.
+      try {
+        await remove(tempRoot);
+      } catch (error) {
+        logger.warn('importTiddlersFromHtmlUrl: tmp cleanup failed', { tempRoot, error });
+      }
+    }
   }
 
   public async copyWikiTemplate(newFolderPath: string, folderName: string): Promise<void> {
@@ -289,25 +408,75 @@ export class Wiki implements IWikiService {
     const loggerMeta = { worker: 'NodeJSWiki', homePath: wikiFolderLocation, workspaceID };
 
     await new Promise<void>((resolve, reject) => {
-      // Add a safety timeout to prevent startWiki from hanging indefinitely.
-      // The worker may boot TiddlyWiki successfully but the 'booted' message might
-      // not arrive via the workerAdapter Observable due to thread communication issues.
-      const startWikiTimeout = setTimeout(() => {
-        logger.error('startWiki timed out waiting for booted message', {
+      // Two-phase timeout for worker startup.
+      //
+      // Why: `wikiInstance.boot.startup()` inside the worker is synchronous
+      // and CPU-bound — it reads + parses every `.tid`/`.json` under
+      // `tiddlers/` before emitting `booted`. On Windows NTFS with ~18k
+      // tiddlers (e.g. right after a TiddlyWeb HTML-snapshot clone) that
+      // single call can take 60–180s, and the worker thread is fully
+      // blocked the whole time — no stdout, no control messages, nothing.
+      // So a sliding "kick on any activity" timer wouldn't help either.
+      //
+      // Strategy: split the budget around the `start` control message,
+      // which fires at the very top of `startNodeJSWiki` BEFORE boot.
+      //
+      //   • Phase 1 (pre-start, ${PRE_START_TIMEOUT_MS}ms):
+      //     If we don't hear `start` within this window, the worker
+      //     failed to spawn / failed to initialise its observable.
+      //     That's the real "message was lost" / broken-thread case
+      //     the original timeout was guarding against.
+      //
+      //   • Phase 2 (post-start, ${POST_START_TIMEOUT_MS}ms):
+      //     Once `start` has arrived we know the observable is flowing.
+      //     Give boot a generous ceiling for very large wikis; if
+      //     `booted` still hasn't arrived after this, something's
+      //     genuinely wrong (infinite-loop plugin, pathological wiki,
+      //     etc.) and we fail visibly.
+      const PRE_START_TIMEOUT_MS = 30_000;
+      const POST_START_TIMEOUT_MS = 10 * 60_000;
+      const startedAt = Date.now();
+      let activeTimer: ReturnType<typeof setTimeout> | undefined;
+      let seenStart = false;
+      const clearActiveTimer = () => {
+        if (activeTimer !== undefined) {
+          clearTimeout(activeTimer);
+          activeTimer = undefined;
+        }
+      };
+      activeTimer = setTimeout(() => {
+        logger.error('startWiki pre-start timeout — worker never emitted "start"', {
           ...loggerMeta,
           function: 'startWiki.timeout',
+          phase: 'pre-start',
+          elapsedMs: Date.now() - startedAt,
         });
-        reject(new Error(`startWiki timed out for workspace ${workspaceID} (worker may have booted but message was lost)`));
-      }, 60_000);
+        reject(new Error(`startWiki timed out for workspace ${workspaceID} (worker didn't emit 'start' within ${PRE_START_TIMEOUT_MS}ms — worker may have failed to spawn or the observable channel is broken)`));
+      }, PRE_START_TIMEOUT_MS);
+
+      const enterPostStartPhase = () => {
+        if (seenStart) return;
+        seenStart = true;
+        clearActiveTimer();
+        activeTimer = setTimeout(() => {
+          logger.error('startWiki post-start timeout — boot never emitted "booted"', {
+            ...loggerMeta,
+            function: 'startWiki.timeout',
+            phase: 'post-start',
+            elapsedMs: Date.now() - startedAt,
+          });
+          reject(new Error(`startWiki timed out for workspace ${workspaceID} (worker emitted 'start' but boot did not complete within ${POST_START_TIMEOUT_MS}ms — check wiki size, plugin errors, or CPU starvation)`));
+        }, POST_START_TIMEOUT_MS);
+      };
 
       const originalResolve = resolve;
       const originalReject = reject;
       resolve = (...arguments_) => {
-        clearTimeout(startWikiTimeout);
+        clearActiveTimer();
         originalResolve(...arguments_);
       };
       reject = (...arguments_) => {
-        clearTimeout(startWikiTimeout);
+        clearActiveTimer();
         originalReject(...arguments_);
       };
 
@@ -356,6 +525,13 @@ export class Wiki implements IWikiService {
 
       worker.startNodeJSWiki(workerData).subscribe(async (message) => {
         if (message.type === 'control') {
+          // First control message of any kind proves the Observable channel
+          // between worker and main thread is alive. Swap the short pre-start
+          // budget for the generous post-start one NOW, before we do the
+          // workspaceService.update await below — that write could itself
+          // take a few hundred ms on a loaded SSD and we don't want to race
+          // the pre-start timer for no reason.
+          enterPostStartPhase();
           await workspaceService.update(workspaceID, { lastNodeJSArgv: message.argv }, true);
           switch (message.actions) {
             case WikiControlActions.booted: {
@@ -371,6 +547,9 @@ export class Wiki implements IWikiService {
               break;
             }
             case WikiControlActions.start: {
+              // Timeout phase is already advanced at the top of the subscribe
+              // callback — any control message arriving is enough. Here we
+              // just log.
               if (message.message !== undefined) {
                 logger.debug('WikiControlActions.start', { 'message.message': message.message, ...loggerMeta, workspaceID });
               }
@@ -544,6 +723,15 @@ export class Wiki implements IWikiService {
   }
 
   public async stopWiki(id: string): Promise<void> {
+    // Stop the sync interval FIRST, regardless of whether the wiki worker is
+    // tracked. For TiddlyWeb workspaces the interval is driven entirely from
+    // the main process (not the worker), and it keeps firing against a
+    // removed/dead worker unless cleared here. Previously this call lived
+    // inside the `if (worker)` block so an un-booted worker left a zombie
+    // interval spamming "No wiki for <id>" on every tick.
+    const syncService = container.get<ISyncService>(serviceIdentifier.Sync);
+    syncService.stopIntervalSync(id);
+
     const workerData = this.wikiWorkers[id];
     const worker = workerData?.proxy;
     const nativeWorker = workerData?.nativeWorker;
@@ -556,9 +744,6 @@ export class Wiki implements IWikiService {
       });
       return;
     }
-
-    const syncService = container.get<ISyncService>(serviceIdentifier.Sync);
-    syncService.stopIntervalSync(id);
 
     try {
       logger.info(`worker.beforeExit for ${id}`);

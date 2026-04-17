@@ -39,10 +39,50 @@ export interface ITiddlyWebSyncService {
   testConnection(workspaceId: string): Promise<TiddlyWebConnectionResult>;
 
   /**
+   * Pre-workspace health check. Used from the "Clone from TiddlyWeb server"
+   * form, where no workspace exists yet. Runs in the main process — bypasses
+   * the renderer's CORS rules so it works against servers that don't emit
+   * `Access-Control-Allow-Origin`.
+   */
+  testServerAdHoc(
+    baseUrl: string,
+    recipe: string,
+    username: string,
+    password: string,
+  ): Promise<TiddlyWebConnectionResult>;
+
+  /**
    * Drop all stored sync state for the workspace. Next sync will be treated as
    * a first-sync (server-wins with local-backup-on-conflict).
    */
   resetSyncState(workspaceId: string): Promise<void>;
+
+  /**
+   * Pre-populate sync state from an HTML-snapshot clone so the first sync can
+   * skip re-downloading tiddlers we already extracted from the snapshot. See
+   * the implementation's jsdoc for the full rationale and invariants. Safe to
+   * call on a workspace that already has sync state — existing entries are
+   * preserved and only missing ones are seeded.
+   */
+  seedSyncState(
+    workspaceId: string,
+    entries: Array<{ title: string; revision: string; bag?: string }>,
+  ): Promise<{ seeded: number }>;
+
+  /**
+   * Release all per-workspace state (in-flight Promise, progress Subject,
+   * cached state store, last-error entry). Called when a workspace is being
+   * removed. Safe to call on a workspace that was never synced.
+   */
+  cleanupWorkspace(workspaceId: string): Promise<void>;
+
+  /**
+   * Delete all local tiddlers under `$:/sync/conflicts/`. Used to clean up
+   * pollution from the pre-fix era when spurious conflicts created thousands
+   * of backup tiddlers on every sync pass.
+   * @returns number of tiddlers deleted.
+   */
+  cleanupConflictBackups(workspaceId: string): Promise<{ deleted: number }>;
 
   /**
    * Get summary stats for the UI: count, last sync time, last error.
@@ -116,7 +156,11 @@ export const TiddlyWebSyncServiceIPCDescriptor = {
   properties: {
     syncWorkspace: ProxyPropertyType.Function,
     testConnection: ProxyPropertyType.Function,
+    testServerAdHoc: ProxyPropertyType.Function,
     resetSyncState: ProxyPropertyType.Function,
+    seedSyncState: ProxyPropertyType.Function,
+    cleanupWorkspace: ProxyPropertyType.Function,
+    cleanupConflictBackups: ProxyPropertyType.Function,
     getStatus: ProxyPropertyType.Function,
     progress$: ProxyPropertyType.Function$,
   },

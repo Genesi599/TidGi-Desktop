@@ -21,6 +21,7 @@ import type { IContextService } from '@services/context/interface';
 import { i18n } from '@services/libs/i18n';
 import { logger } from '@services/libs/log';
 import type { ISyncService } from '@services/sync/interface';
+import type { ITiddlyWebSyncService } from '@services/tiddlywebSync/interface';
 import { SupportedStorageServices } from '@services/types';
 import { updateGhConfig } from '@services/wiki/plugin/ghPages';
 import { hasGit } from 'git-sync-js';
@@ -84,25 +85,34 @@ export class WikiGitWorkspace implements IWikiGitWorkspaceService {
       // for actual git-backed providers (github/gitlab/codeberg/gitea/testOAuth).
       const isSyncedViaGit = storageService !== SupportedStorageServices.local
         && storageService !== SupportedStorageServices.tiddlyweb;
-      if (await hasGit(wikiFolderLocation)) {
+      // TiddlyWeb sync doesn't use git at all — `sync/index.ts` routes tiddlyweb
+      // workspaces to `TiddlyWebSync.syncWorkspace` and never touches
+      // `gitService.commitAndSync`. Skip `initWikiGit` entirely here: on a
+      // full-mirror clone the preceding snapshot import drops ~19k tiddler
+      // files into the folder, and `git-sync-js`'s `initGit` does an
+      // unconditional `git add . && git commit` (labelled "Initial Commit
+      // with Git-Sync-JS") that takes 20–60s on Windows NTFS before the wiki
+      // worker can even boot. Users who want local git history can opt in
+      // later from Edit Workspace.
+      if (storageService === SupportedStorageServices.tiddlyweb) {
+        logger.info('Skip git init for tiddlyweb workspace (syncs over HTTP, not git).', { wikiFolderLocation, workspaceID });
+      } else if (await hasGit(wikiFolderLocation)) {
         logger.warn('Skip git init because it already has a git setup.', { wikiFolderLocation });
-      } else {
-        if (isSyncedViaGit) {
-          if (typeof gitUrl === 'string' && userInfo !== undefined) {
-            const gitService = container.get<IGitService>(serviceIdentifier.Git);
-            await gitService.initWikiGit(wikiFolderLocation, isSyncedViaGit, !isSubWiki, gitUrl, userInfo);
-            const authService = container.get<IAuthenticationService>(serviceIdentifier.Authentication);
-            const branch = await authService.get(`${storageService}-branch`);
-            if (branch !== undefined) {
-              await updateGhConfig(wikiFolderLocation, { branch });
-            }
-          } else {
-            throw new InitWikiGitSyncedWikiNoGitUserInfoError(gitUrl, userInfo);
+      } else if (isSyncedViaGit) {
+        if (typeof gitUrl === 'string' && userInfo !== undefined) {
+          const gitService = container.get<IGitService>(serviceIdentifier.Git);
+          await gitService.initWikiGit(wikiFolderLocation, isSyncedViaGit, !isSubWiki, gitUrl, userInfo);
+          const authService = container.get<IAuthenticationService>(serviceIdentifier.Authentication);
+          const branch = await authService.get(`${storageService}-branch`);
+          if (branch !== undefined) {
+            await updateGhConfig(wikiFolderLocation, { branch });
           }
         } else {
-          const gitService = container.get<IGitService>(serviceIdentifier.Git);
-          await gitService.initWikiGit(wikiFolderLocation, false);
+          throw new InitWikiGitSyncedWikiNoGitUserInfoError(gitUrl, userInfo);
         }
+      } else {
+        const gitService = container.get<IGitService>(serviceIdentifier.Git);
+        await gitService.initWikiGit(wikiFolderLocation, false);
       }
       return newWorkspace;
     } catch (error_: unknown) {
@@ -208,62 +218,131 @@ export class WikiGitWorkspace implements IWikiGitWorkspaceService {
 
   public async removeWorkspace(workspaceID: string): Promise<void> {
     const mainWindow = container.get<IWindowService>(serviceIdentifier.Window).get(WindowNames.main);
-    if (mainWindow !== undefined) {
-      const workspaceService = container.get<IWorkspaceService>(serviceIdentifier.Workspace);
-      const workspace = await workspaceService.get(workspaceID);
-      if (workspace === undefined) {
-        throw new Error(`Need to get workspace with id ${workspaceID} but failed`);
+    if (mainWindow === undefined) {
+      return;
+    }
+    const workspaceService = container.get<IWorkspaceService>(serviceIdentifier.Workspace);
+    const workspace = await workspaceService.get(workspaceID);
+    if (workspace === undefined) {
+      throw new Error(`Need to get workspace with id ${workspaceID} but failed`);
+    }
+    if (!isWikiWorkspace(workspace)) {
+      throw new Error('removeWikiGitTransaction can only be called with wiki workspaces');
+    }
+    const { isSubWiki, mainWikiToLink, wikiFolderLocation, id, name, storageService } = workspace;
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      buttons: [i18n.t('WorkspaceSelector.RemoveWorkspace'), i18n.t('WorkspaceSelector.RemoveWorkspaceAndDelete'), i18n.t('Cancel')],
+      message: `${i18n.t('EditWorkspace.Name')} ${name} ${isSubWiki ? i18n.t('EditWorkspace.IsSubWorkspace') : ''} ${i18n.t('WorkspaceSelector.AreYouSure')}`,
+      cancelId: 2,
+    });
+    const removeWorkspaceAndDelete = response === 1;
+    const onlyRemoveWorkspace = response === 0;
+    if (!onlyRemoveWorkspace && !removeWorkspaceAndDelete) {
+      return;
+    }
+
+    const wikiService = container.get<IWikiService>(serviceIdentifier.Wiki);
+    logger.info('removeWorkspace: begin', { function: 'removeWorkspace', workspaceID, storageService, isSubWiki, removeWorkspaceAndDelete });
+
+    // ── 1. Recursively remove sub-wikis (main wiki only). Do this FIRST so a
+    //       failing sub-removal can't leave us in a half-removed state where
+    //       the main wiki is gone from the DB but its subs still reference it.
+    //       Each sub-removal is best-effort; one failure doesn't abort the
+    //       others or the main removal.
+    if (!isSubWiki) {
+      const subWikis = workspaceService.getSubWorkspacesAsListSync(id);
+      if (subWikis.length > 0) {
+        logger.info('removeWorkspace: removing sub-wikis', { function: 'removeWorkspace', workspaceID, subCount: subWikis.length });
+        await Promise.all(subWikis.map(async (subWiki) => {
+          try {
+            await this.removeWorkspace(subWiki.id);
+          } catch (error) {
+            logger.error('removeWorkspace: sub-wiki removal failed', { function: 'removeWorkspace', workspaceID, subWikiID: subWiki.id, error });
+          }
+        }));
       }
-      if (!isWikiWorkspace(workspace)) {
-        throw new Error('removeWikiGitTransaction can only be called with wiki workspaces');
-      }
-      const { isSubWiki, mainWikiToLink, wikiFolderLocation, id, name } = workspace;
-      const { response } = await dialog.showMessageBox(mainWindow, {
-        type: 'question',
-        buttons: [i18n.t('WorkspaceSelector.RemoveWorkspace'), i18n.t('WorkspaceSelector.RemoveWorkspaceAndDelete'), i18n.t('Cancel')],
-        message: `${i18n.t('EditWorkspace.Name')} ${name} ${isSubWiki ? i18n.t('EditWorkspace.IsSubWorkspace') : ''} ${i18n.t('WorkspaceSelector.AreYouSure')}`,
-        cancelId: 2,
-      });
+    }
+
+    // ── 2. Stop the wiki worker. Has its own internal timeout (5s on
+    //       beforeExit), but wrap again here so even a catastrophic throw
+    //       can't block the DB removal below.
+    try {
+      await wikiService.stopWiki(id);
+    } catch (error) {
+      logger.error('removeWorkspace: stopWiki failed', { function: 'removeWorkspace', workspaceID, error });
+    }
+
+    // ── 3. TiddlyWeb-specific state cleanup. The TiddlyWebSync service keeps
+    //       per-workspace Maps (inFlight, progress subject, state store cache,
+    //       last error) that stopWiki doesn't touch. Without this the Maps
+    //       grow monotonically across workspace removals and, worse, an
+    //       in-flight sync keeps trying to call wikiOperationInServer on a
+    //       removed workspace.
+    if (storageService === SupportedStorageServices.tiddlyweb) {
       try {
-        const removeWorkspaceAndDelete = response === 1;
-        const onlyRemoveWorkspace = response === 0;
-        if (!onlyRemoveWorkspace && !removeWorkspaceAndDelete) {
-          return;
-        }
-        const wikiService = container.get<IWikiService>(serviceIdentifier.Wiki);
-        const workspaceService = container.get<IWorkspaceService>(serviceIdentifier.Workspace);
-        await wikiService.stopWiki(id).catch((error_: unknown) => {
-          const error = error_ as Error;
-          logger.error(error.message, { error });
-        });
+        const tiddlyWebSync = container.get<ITiddlyWebSyncService>(serviceIdentifier.TiddlyWebSync);
+        await tiddlyWebSync.cleanupWorkspace(id);
+      } catch (error) {
+        logger.error('removeWorkspace: tiddlyWebSync.cleanupWorkspace failed', { function: 'removeWorkspace', workspaceID, error });
+      }
+    }
+
+    // ── 4. Remove from the database FIRST, before touching views or files.
+    //       This is the primary user intent — "I want the workspace gone from
+    //       my sidebar". Previously this ran last, so any prior failure (view
+    //       teardown, file deletion, etc) would silently abort removal and
+    //       leave the workspace stuck in the sidebar. Keep it early and
+    //       unconditional so the UI always reflects the user's choice.
+    try {
+      await workspaceService.remove(workspaceID);
+      logger.info('removeWorkspace: DB entry removed', { function: 'removeWorkspace', workspaceID });
+    } catch (error) {
+      logger.error('removeWorkspace: workspaceService.remove failed', { function: 'removeWorkspace', workspaceID, error });
+      // If we can't remove from the DB there's no point continuing — sidebar
+      // won't update and further teardown would desynchronise state.
+      return;
+    }
+
+    // ── 5. Destroy the BrowserView(s) for this workspace. Failure here is
+    //       cosmetic (view stays rendered until next restart) and must not
+    //       revert the DB removal.
+    try {
+      await container.get<IWorkspaceViewService>(serviceIdentifier.WorkspaceView).removeWorkspaceView(workspaceID);
+    } catch (error) {
+      logger.error('removeWorkspace: removeWorkspaceView failed', { function: 'removeWorkspace', workspaceID, error });
+    }
+
+    // ── 6. Optionally delete files on disk. Done AFTER stopWiki+DB-remove so
+    //       all file handles are closed and the workspace is already gone
+    //       from the user's perspective even if trashItem fails (e.g.
+    //       Windows file-lock contention).
+    if (removeWorkspaceAndDelete) {
+      try {
         if (isSubWiki) {
           if (mainWikiToLink === null) {
             throw new Error(`workspace.mainWikiToLink is null in WikiGitWorkspace.removeWorkspace ${JSON.stringify(workspace)}`);
           }
           await wikiService.removeWiki(wikiFolderLocation, mainWikiToLink, onlyRemoveWorkspace);
-          // Sub-wiki configuration is now handled by FileSystemAdaptor in watch-filesystem plugin
         } else {
-          // is main wiki, also delete all sub wikis
-          const subWikis = workspaceService.getSubWorkspacesAsListSync(id);
-          await Promise.all(subWikis.map(async (subWiki) => {
-            await this.removeWorkspace(subWiki.id);
-          }));
-          if (removeWorkspaceAndDelete) {
-            await wikiService.removeWiki(wikiFolderLocation);
-          }
+          await wikiService.removeWiki(wikiFolderLocation);
         }
-        await container.get<IWorkspaceViewService>(serviceIdentifier.WorkspaceView).removeWorkspaceView(workspaceID);
-        await workspaceService.remove(workspaceID);
-        // switch to first workspace
-        const firstWorkspace = await workspaceService.getFirstWorkspace();
-        if (firstWorkspace !== undefined) {
-          await container.get<IWorkspaceViewService>(serviceIdentifier.WorkspaceView).setActiveWorkspaceView(firstWorkspace.id);
-        }
-      } catch (error_: unknown) {
-        const error = error_ as Error;
-        logger.error(error.message, { error });
+      } catch (error) {
+        logger.error('removeWorkspace: removeWiki (file deletion) failed', { function: 'removeWorkspace', workspaceID, wikiFolderLocation, error });
       }
     }
+
+    // ── 7. Switch active view to the first remaining workspace. Best-effort.
+    try {
+      const firstWorkspace = await workspaceService.getFirstWorkspace();
+      if (firstWorkspace !== undefined) {
+        await container.get<IWorkspaceViewService>(serviceIdentifier.WorkspaceView).setActiveWorkspaceView(firstWorkspace.id);
+      }
+    } catch (error) {
+      logger.error('removeWorkspace: setActiveWorkspaceView failed', { function: 'removeWorkspace', workspaceID, error });
+    }
+
+    logger.info('removeWorkspace: done', { function: 'removeWorkspace', workspaceID });
   }
 
   public async moveWorkspaceLocation(workspaceID: string, newParentLocation: string): Promise<void> {

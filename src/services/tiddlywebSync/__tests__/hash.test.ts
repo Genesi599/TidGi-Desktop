@@ -63,6 +63,25 @@ describe('computeTiddlerHash', () => {
     expect(a).toBe(b);
   });
 
+  test('creator/modifier are excluded (TW auto-populates them on local writes)', () => {
+    // Reproduces the "thousands of $:/sync/conflicts/* per sync" bug: server
+    // returns modifier=<server-user>, local write sets modifier=<tidgi-user>,
+    // reconciler then mistakes a pure metadata diff for a real conflict.
+    const fromServer = computeTiddlerHash({
+      title: 'Foo',
+      text: 'hi',
+      creator: 'ServerUser',
+      modifier: 'ServerUser',
+    });
+    const afterLocalRoundtrip = computeTiddlerHash({
+      title: 'Foo',
+      text: 'hi',
+      creator: 'LocalUser',
+      modifier: 'LocalUser',
+    });
+    expect(fromServer).toBe(afterLocalRoundtrip);
+  });
+
   test('user fields contribute to hash', () => {
     const a = computeTiddlerHash({ title: 'Foo', text: 'x', 'my-custom': 'v1' });
     const b = computeTiddlerHash({ title: 'Foo', text: 'x', 'my-custom': 'v2' });

@@ -150,11 +150,172 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
     }
   }
 
+  public async testServerAdHoc(
+    baseUrl: string,
+    recipe: string,
+    username: string,
+    password: string,
+  ): Promise<TiddlyWebConnectionResult> {
+    try {
+      const trimmedUrl = baseUrl.trim().replace(/\/+$/, '');
+      if (trimmedUrl.length === 0) {
+        return { reachable: false, error: 'URL is empty' };
+      }
+      const client = new TiddlyWebClient({
+        baseUrl: trimmedUrl,
+        recipe: recipe.trim().length > 0 ? recipe.trim() : 'default',
+        username: username.trim(),
+        password,
+      });
+      const reachable = await client.checkReachable();
+      return { reachable };
+    } catch (error) {
+      return { reachable: false, error: (error as Error).message };
+    }
+  }
+
   public async resetSyncState(workspaceId: string): Promise<void> {
     const store = await this.getStateStore(workspaceId);
     store.clearAll();
     await store.save();
     logger.info('TiddlyWebSync: sync state reset', { workspaceId });
+  }
+
+  /**
+   * Pre-populate sync state from an HTML-snapshot import so the subsequent
+   * first sync can skip re-downloading tiddlers we already have on disk.
+   *
+   * Rationale: the TiddlyWeb clone flow downloads a server HTML snapshot,
+   * extracts ~18k tiddlers into `tiddlers/`, then registers the workspace
+   * and fires a first sync. Without seeding, reconcile() sees `L && R && !S`
+   * for every tiddler and emits `pull-with-backupLocal` → one HTTP GET per
+   * tiddler → minutes of wasted traffic to re-fetch byte-identical content.
+   *
+   * How seeding works:
+   *   1. Caller extracts `(title, revision, bag)` triples from the snapshot
+   *      files and passes them here.
+   *   2. We write entries flagged `fromSnapshot: true` with a placeholder
+   *      empty hash. (We don't know the hash yet — the definitive hash
+   *      depends on TW's add/readTiddler round-trip, and the wiki hasn't
+   *      started. So we defer hash recording to the first runSync.)
+   *   3. On the very next `runSync`, the pre-reconcile graduation loop fills
+   *      in each seeded entry's `lastSyncedLocalHash` from the live local
+   *      map and clears `fromSnapshot`. Reconciler then sees matching hash
+   *      + matching revision → skip.
+   *
+   * Idempotence: existing entries are NOT overwritten. If a user somehow
+   * re-imports a snapshot over an already-synced workspace, their real sync
+   * history wins.
+   *
+   * Fingerprint: we proactively set the store fingerprint to match what the
+   * first sync will compute, so `ensureFingerprint` during runSync doesn't
+   * wipe our seeded entries.
+   */
+  public async seedSyncState(
+    workspaceId: string,
+    entries: Array<{ title: string; revision: string; bag?: string }>,
+  ): Promise<{ seeded: number }> {
+    if (entries.length === 0) return { seeded: 0 };
+    const workspace = await this.getWorkspaceIfTiddlyWeb(workspaceId);
+    if (!workspace?.tiddlywebUrl) {
+      logger.warn('TiddlyWebSync.seedSyncState: workspace not tiddlyweb or missing URL; skipping', { workspaceId });
+      return { seeded: 0 };
+    }
+    const store = await this.getStateStore(workspaceId);
+    store.ensureFingerprint(`${workspace.tiddlywebUrl}|${workspace.tiddlywebRecipe ?? 'default'}`);
+    const now = Date.now();
+    let seeded = 0;
+    for (const entry of entries) {
+      if (typeof entry.title !== 'string' || entry.title.length === 0) continue;
+      if (typeof entry.revision !== 'string' || entry.revision.length === 0) continue;
+      // Don't clobber an existing entry — a prior successful sync's data is
+      // strictly more authoritative than our snapshot-derived guess.
+      if (store.get(entry.title) !== undefined) continue;
+      store.upsert({
+        title: entry.title,
+        lastKnownRemoteRevision: entry.revision,
+        lastSyncedLocalHash: '',
+        lastSyncedAt: now,
+        bag: entry.bag,
+        fromSnapshot: true,
+      });
+      seeded += 1;
+    }
+    await store.save();
+    logger.info('TiddlyWebSync.seedSyncState: seeded entries from HTML snapshot', {
+      workspaceId,
+      seeded,
+      provided: entries.length,
+    });
+    return { seeded };
+  }
+
+  /**
+   * Release every per-workspace resource this service holds.
+   *
+   * Called from the workspace-removal flow. If we skip this, each of the four
+   * maps below keeps the workspace entry forever:
+   *   - `inFlight`        — a live Promise that will try to call
+   *                         `wikiOperationInServer` on an id that no longer
+   *                         exists (spams errors in the log)
+   *   - `progressSubjects` — unsubscribed Observable stays hot
+   *   - `stateStores`      — ~MB-scale tiddler map pinned in memory
+   *   - `lastErrors`       — trivial but still a leak
+   *
+   * Completing the in-flight promise (rather than cancelling it — we have no
+   * AbortSignal plumbed through the client) is best-effort: we just let it
+   * resolve naturally before dropping the map entry. Most callers await this
+   * method with a short timeout; if the sync takes longer, we drop the entry
+   * anyway and the trailing IO will fail harmlessly against a dead worker.
+   */
+  public async cleanupWorkspace(workspaceId: string): Promise<void> {
+    const inFlight = this.inFlight.get(workspaceId);
+    if (inFlight !== undefined) {
+      try {
+        // Cap the wait so a stuck sync can't block workspace removal forever.
+        await Promise.race([
+          inFlight.catch(() => undefined),
+          new Promise((resolve) => setTimeout(resolve, 2000)),
+        ]);
+      } catch {
+        // Already caught above; this catch is just belt-and-braces.
+      }
+    }
+    this.inFlight.delete(workspaceId);
+    const progressSubject = this.progressSubjects.get(workspaceId);
+    if (progressSubject !== undefined) {
+      progressSubject.complete();
+      this.progressSubjects.delete(workspaceId);
+    }
+    this.stateStores.delete(workspaceId);
+    this.lastErrors.delete(workspaceId);
+    logger.info('TiddlyWebSync: workspace state cleared', { workspaceId });
+  }
+
+  public async cleanupConflictBackups(workspaceId: string): Promise<{ deleted: number }> {
+    const workspace = await this.getWorkspaceIfTiddlyWeb(workspaceId);
+    if (!workspace) return { deleted: 0 };
+    const wikiService = container.get<IWikiService>(serviceIdentifier.Wiki);
+    // Use getTiddlersAsJson with a prefix filter to enumerate conflict backups.
+    const result = await wikiService.wikiOperationInServer(
+      WikiChannel.getTiddlersAsJson,
+      workspaceId,
+      [`[prefix[${CONFLICT_BACKUP_PREFIX}]]`],
+    );
+    if (!Array.isArray(result)) return { deleted: 0 };
+    let deleted = 0;
+    for (const raw of result as Array<Record<string, unknown>>) {
+      const title = raw.title;
+      if (typeof title !== 'string') continue;
+      try {
+        await wikiService.wikiOperationInServer(WikiChannel.deleteTiddler, workspaceId, [title]);
+        deleted += 1;
+      } catch (error) {
+        logger.warn('TiddlyWebSync: cleanupConflictBackups failed for tiddler', { workspaceId, title, error });
+      }
+    }
+    logger.info('TiddlyWebSync: conflict backups cleaned up', { workspaceId, deleted });
+    return { deleted };
   }
 
   public async getStatus(workspaceId: string): Promise<TiddlyWebSyncStatus> {
@@ -234,6 +395,63 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
         remote.set(summary.title, { revision: summary.revision, bag: summary.bag });
       }
 
+      // ── 2.5. Triage snapshot-seeded state entries ────────────────────
+      // HTML-snapshot seeding wrote entries with `fromSnapshot: true` and
+      // an empty hash placeholder. Now that we've read both the live local
+      // store and the server's tiddler listing, we split those seeded
+      // entries into two groups based on whether the server actually lists
+      // the title:
+      //
+      //   (a) Confirmed — server lists the title. Fill in the authoritative
+      //       local hash and clear `fromSnapshot`. Reconciler then sees
+      //       matching hash + matching revision and skips — no redundant
+      //       pull of the tens of thousands of tiddlers we already got
+      //       from the snapshot.
+      //
+      //   (b) Orphan — server does NOT list the title. This is by far the
+      //       common case for plugin / theme / system tiddlers: the server
+      //       materialises them in-page (so they appeared in the snapshot
+      //       HTML) but its recipe doesn't expose them over HTTP. CRITICAL:
+      //       we must NOT let the reconciler run its normal logic on these
+      //       entries — with `L && !R && S && L.hash === S.lastSyncedLocalHash`
+      //       it would emit `delete-local` for every one of them, wiping
+      //       the 18k snapshot files on first sync and leaving the user's
+      //       wiki as a blank template on next restart. Instead: record
+      //       the live local hash but KEEP `fromSnapshot: true`. The
+      //       reconciler has a dedicated short-circuit for this flag that
+      //       emits no action — the local file stays, the server stays,
+      //       and the entry continues to suppress sync churn on every
+      //       subsequent run. If the server ever starts listing the title,
+      //       that later sync's graduation step lands it in branch (a).
+      let graduatedFromSnapshot = 0;
+      let snapshotOrphans = 0;
+      for (const [title, entry] of store.all()) {
+        if (entry.fromSnapshot !== true) continue;
+        const L = local.get(title);
+        if (remote.has(title)) {
+          store.upsert({
+            ...entry,
+            fromSnapshot: false,
+            lastSyncedLocalHash: L?.hash ?? '',
+          });
+          graduatedFromSnapshot += 1;
+        } else {
+          store.upsert({
+            ...entry,
+            // fromSnapshot intentionally left true — see branch (b) above.
+            lastSyncedLocalHash: L?.hash ?? '',
+          });
+          snapshotOrphans += 1;
+        }
+      }
+      if (graduatedFromSnapshot > 0 || snapshotOrphans > 0) {
+        logger.info('TiddlyWebSync: triaged snapshot-seeded entries', {
+          workspaceId,
+          graduatedFromSnapshot,
+          snapshotOrphans,
+        });
+      }
+
       // ── 3. Reconcile ──────────────────────────────────────────────────
       const actions = reconcile({ local, remote, syncState: store.all() });
       const summary = summarise(actions);
@@ -244,13 +462,25 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
       // Safety: each action operates on a distinct tiddler title, so the
       // shared store / localFieldsByTitle / progress subject are all
       // concurrency-safe under JS's single-threaded event loop.
-      // Checkpoint state every 500 actions so a mid-sync crash doesn't throw
-      // away hours of work on a 20k-tiddler first pass.
-      const CHECKPOINT_EVERY = 500;
+      //
+      // Performance notes:
+      //   - CHECKPOINT_EVERY=5000: state.save() JSON.stringifies the whole
+      //     Map and does an atomic temp+rename write. On a 20k-tiddler pass,
+      //     saving every 500 items means 40 writes of a Map that grows by
+      //     the same amount each time — O(N²) disk I/O. 5000 shrinks this
+      //     to 4 writes; the fresh checkpoint on finish still guarantees
+      //     we never lose more than ~5000 items' progress to a crash.
+      //   - Progress events are throttled (see PROGRESS_MIN_INTERVAL_MS).
+      //     Otherwise we'd emit 20000 RxJS events → 20000 IPC hops to the
+      //     renderer → 20000 React re-renders, which noticeably chokes the
+      //     UI and adds its own O(N) tail to sync time.
+      const CHECKPOINT_EVERY = 5000;
+      const PROGRESS_MIN_INTERVAL_MS = 200;
       const errors: TiddlyWebSyncResult['errors'] = [];
       let completed = 0;
       let nextIndex = 0;
       let lastCheckpoint = 0;
+      let lastProgressAt = 0;
       let checkpointInFlight: Promise<void> | undefined;
       const workerCount = Math.min(APPLY_CONCURRENCY, actions.length);
       const workers = Array.from({ length: workerCount }, async () => {
@@ -258,14 +488,20 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
           const idx = nextIndex++;
           if (idx >= actions.length) return;
           const action = actions[idx];
-          // Emit progress BEFORE work, so "applying N/total" reflects next item.
-          progress.next({
-            phase: 'applying',
-            workspaceId,
-            completed,
-            total: actions.length,
-            currentTitle: 'title' in action ? action.title : undefined,
-          });
+          // Throttle progress events — we don't need one per tiddler.
+          // Always emit the very first one (so the UI updates promptly from
+          // 'reconciled' into 'applying 1/N').
+          const now = Date.now();
+          if (idx === 0 || now - lastProgressAt >= PROGRESS_MIN_INTERVAL_MS) {
+            lastProgressAt = now;
+            progress.next({
+              phase: 'applying',
+              workspaceId,
+              completed,
+              total: actions.length,
+              currentTitle: 'title' in action ? action.title : undefined,
+            });
+          }
           try {
             await this.applyAction(action, workspaceId, client, store, localFieldsByTitle, wikiService);
           } catch (error) {
@@ -294,6 +530,14 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
       if (checkpointInFlight) {
         await checkpointInFlight;
       }
+      // Emit one final applying event so the UI shows the last-processed
+      // item's number even if the throttle skipped it.
+      progress.next({
+        phase: 'applying',
+        workspaceId,
+        completed,
+        total: actions.length,
+      });
 
       // ── 5. Persist state ──────────────────────────────────────────────
       store.setLastFullSyncAt(Date.now());
@@ -433,10 +677,22 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
     wikiService: IWikiService,
   ): Promise<void> {
     const local = localFieldsByTitle.get(action.title);
-    if (local) {
-      await this.writeConflictBackup(action.title, local, wikiService, workspaceId);
-    }
     const remoteFields = await client.fetchOne(action.title);
+    // The reconciler flagged this as a conflict based on local-hash-vs-state
+    // and remote-revision-vs-state mismatches. But both can drift spuriously:
+    //   - server revisions can bump when .tid files are re-read on server restart,
+    //   - local hashes can shift if a write-roundtrip through TW's addTiddler
+    //     changes anything outside our METADATA_FIELDS.
+    // Before writing a backup tiddler (which creates a NEW local title and
+    // therefore visible clutter that grows every sync), confirm local and
+    // remote content genuinely differ by comparing their hashes directly.
+    // If they're identical we silently update state and move on — no backup
+    // noise, no per-sync accumulation of `$:/sync/conflicts/*`.
+    const realConflict = local !== undefined
+      && computeTiddlerHash(local) !== computeTiddlerHash(remoteFields);
+    if (realConflict) {
+      await this.writeConflictBackup(action.title, local!, wikiService, workspaceId);
+    }
     await this.writeTiddlerLocally(remoteFields, wikiService, workspaceId);
     store.upsert({
       title: action.title,

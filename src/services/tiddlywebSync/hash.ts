@@ -17,8 +17,18 @@
 
 import { createHash } from 'crypto';
 
-/** Fields that are metadata and must not contribute to the content hash. */
-const METADATA_FIELDS = new Set(['modified', 'created', 'revision', 'bag']);
+/**
+ * Fields that are metadata and must not contribute to the content hash.
+ *
+ * `creator` / `modifier` are excluded because TiddlyWiki's `addTiddler` API
+ * auto-populates them with the current user on every write. If we hashed them,
+ * writing a server tiddler locally would produce a different hash than the
+ * server's (since server's user context differs) — the reconciler would
+ * mistake it for "local content changed", leading to spurious push-or-conflict
+ * cycles on every subsequent sync. The cost of excluding them is low: both
+ * sides still TRANSFER these fields, just don't use them to judge equality.
+ */
+const METADATA_FIELDS = new Set(['modified', 'created', 'revision', 'bag', 'creator', 'modifier']);
 
 export function computeTiddlerHash(fields: Record<string, string | undefined>): string {
   const keys = Object.keys(fields)

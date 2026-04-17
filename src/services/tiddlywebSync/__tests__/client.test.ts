@@ -224,6 +224,20 @@ describe('TiddlyWebClient', () => {
     expect(await client.checkReachable()).toBe(false);
   });
 
+  test('checkReachable falls back to /recipes/<recipe>/tiddlers.json when /status 404s', async () => {
+    // Real-world case: nginx reverse proxy only forwards `/recipes/` to TW,
+    // so `/status` returns 404. The server is still reachable for sync —
+    // checkReachable should reflect that.
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u.endsWith('/status')) return new Response('not found', { status: 404 });
+      if (u.endsWith('/recipes/r/tiddlers.json')) return new Response('[]', { status: 200 });
+      return new Response('', { status: 500 });
+    }) as unknown as typeof fetch;
+    const client = new TiddlyWebClient({ baseUrl: 'https://w', recipe: 'r', fetchImpl });
+    expect(await client.checkReachable()).toBe(true);
+  });
+
   test('trailing slash on baseUrl is stripped', async () => {
     const { fetchImpl, calls } = makeFetch(() => jsonResponse([]));
     const client = new TiddlyWebClient({ baseUrl: 'https://w///', recipe: 'r', fetchImpl });

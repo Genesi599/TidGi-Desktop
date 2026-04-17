@@ -198,17 +198,34 @@ export class TiddlyWebClient {
   }
 
   /**
-   * Lightweight health check: GET /status. Returns true if the server is reachable
-   * and auth (if configured) is accepted.
+   * Lightweight health check. Tries `/status` first (the canonical TW NodeJS
+   * endpoint); if that 404s — common when an nginx reverse proxy only forwards
+   * `/recipes/` — falls back to the recipe tiddler listing. Either 2xx
+   * response means "server is reachable and our creds are accepted".
    */
   public async checkReachable(): Promise<boolean> {
+    const statusUrl = this.url('/status');
     try {
-      const response = await this.fetchImpl(this.url('/status'), {
+      const statusResponse = await this.fetchImpl(statusUrl, {
         method: 'GET',
         headers: this.headers,
         signal: this.config.signal,
       });
-      return response.ok;
+      if (statusResponse.ok) return true;
+      // 2xx → good; any 4xx/5xx on /status → try recipe endpoint. In particular
+      // we want to tolerate 404 (nginx doesn't route /status to TW).
+    } catch {
+      // Network error on /status — could be anything. Try recipe endpoint before
+      // concluding "unreachable".
+    }
+    try {
+      const recipeUrl = this.url(this.recipePath('.json'));
+      const recipeResponse = await this.fetchImpl(recipeUrl, {
+        method: 'GET',
+        headers: this.headers,
+        signal: this.config.signal,
+      });
+      return recipeResponse.ok;
     } catch {
       return false;
     }

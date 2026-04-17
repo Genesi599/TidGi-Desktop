@@ -34,6 +34,30 @@ export interface IWikiService {
    */
   emptyWikiTiddlersFolder(wikiFolderPath: string): Promise<void>;
   /**
+   * Download a remote TiddlyWiki HTML snapshot and extract its embedded
+   * tiddlers into the given wiki's `tiddlers/` directory. Used by the
+   * "Clone from TiddlyWeb server" workflow to pull in plugin / theme
+   * / system tiddlers that the HTTP TiddlyWeb API doesn't expose.
+   * Non-fatal — on failure, returns a diagnostic message for the caller.
+   */
+  importTiddlersFromHtmlUrl(
+    wikiFolderLocation: string,
+    url: string,
+    username?: string,
+    password?: string,
+  ): Promise<{
+    imported: number;
+    errorMessage?: string;
+    /**
+     * Per-tiddler `(title, revision, bag)` triples extracted from the snapshot
+     * files. Consumed by `TiddlyWebSync.seedSyncState` to pre-populate sync
+     * state so the first sync can skip re-downloading tiddlers we already have
+     * locally. Absent / empty if none of the imported tiddlers carried a
+     * `revision` field (e.g. they weren't round-tripped through a server).
+     */
+    seedEntries?: Array<{ title: string; revision: string; bag?: string }>;
+  }>;
+  /**
    * create sub wiki in a parent folder, and link to a main wiki, and set tagName to filesystemPath.tid
    * @param parentFolderLocation
    * @param folderName
@@ -119,6 +143,7 @@ export const WikiServiceIPCDescriptor = {
     cloneWiki: ProxyPropertyType.Function,
     copyWikiTemplate: ProxyPropertyType.Function,
     emptyWikiTiddlersFolder: ProxyPropertyType.Function,
+    importTiddlersFromHtmlUrl: ProxyPropertyType.Function,
     createSubWiki: ProxyPropertyType.Function,
     ensureWikiExist: ProxyPropertyType.Function,
     extractWikiHTML: ProxyPropertyType.Function,

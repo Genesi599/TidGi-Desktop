@@ -52,32 +52,32 @@ export function TiddlyWebWikiForm({
     if (!tiddlywebForm.url) return;
     setTesting(true);
     setTestResult(undefined);
-    // Save credentials to keychain first so the service can read them.
+    // Save credentials to keychain so the subsequent sync has them, AND route
+    // the reachability probe through the main process — electron's renderer
+    // enforces browser-style CORS, and most TW servers don't emit
+    // `Access-Control-Allow-Origin`, so a direct fetch() here would fail with
+    // "Failed to fetch" even when the server is perfectly reachable.
     await window.service.auth.set('tiddlyweb-token', tiddlywebForm.password);
-    // testConnection works on a live workspace id, but we can call a lightweight HEAD here too.
-    // For the pre-creation case, construct the request manually.
     try {
-      const baseUrl = tiddlywebForm.url.replace(/\/$/, '');
-      const statusUrl = `${baseUrl}/status`;
-      const headers: Record<string, string> = { Accept: 'application/json' };
-      if (tiddlywebForm.username.length > 0) {
-        headers.Authorization = 'Basic ' + btoa(`${tiddlywebForm.username}:${tiddlywebForm.password}`);
-      }
-      const response = await fetch(statusUrl, { headers });
-      if (response.ok) {
-        const body = (await response.json()) as { tiddlywiki_version?: string; username?: string };
+      const result = await window.service.tiddlyWebSync.testServerAdHoc(
+        tiddlywebForm.url,
+        tiddlywebForm.recipe,
+        tiddlywebForm.username,
+        tiddlywebForm.password,
+      );
+      if (result.reachable) {
         setTestResult({
           ok: true,
           message: t('AddWorkspace.TiddlyWebCloneTestOK', {
-            version: body.tiddlywiki_version ?? '?',
-            username: body.username ?? '-',
+            version: result.serverInfo?.tiddlywikiVersion ?? '?',
+            username: (result.serverInfo?.username ?? tiddlywebForm.username) || '-',
           }),
         });
       } else {
         setTestResult({
           ok: false,
           message: t('AddWorkspace.TiddlyWebCloneTestFailed', {
-            error: `HTTP ${response.status} ${response.statusText}`,
+            error: result.error ?? 'unknown error',
           }),
         });
       }
