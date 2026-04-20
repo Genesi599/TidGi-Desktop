@@ -103,6 +103,19 @@ export interface TiddlyWebSyncResult {
   summary: ReconcileSummary;
   /** Per-action errors. The sync continues past per-tiddler failures so a single bad item doesn't block everything. */
   errors: Array<{ title: string; action: string; message: string }>;
+  /**
+   * Set when this pass wrote or deleted any tiddler under `$:/plugins/`,
+   * `$:/themes/`, `$:/languages/`, or anything that carried a `plugin-type`
+   * field. TiddlyWiki only materialises a plugin's shadow tiddlers and
+   * executes its JS modules during `boot.startup()`; runtime `addTiddler` of
+   * a plugin title updates the store but leaves the plugin inert and
+   * surfaces the in-wiki banner "Please save and reload to allow changes to
+   * JavaScript plugins to take effect". Callers (`syncWikiIfNeeded`) use
+   * this flag to fire a `restartWorkspaceViewService` + view reload so the
+   * worker re-boots from disk with the freshly-synced plugin files
+   * actually active.
+   */
+  pluginsChanged: boolean;
 }
 
 export interface TiddlyWebConnectionResult {
@@ -148,6 +161,8 @@ export type TiddlyWebSyncProgressEvent =
     summary: ReconcileSummary;
     errors: number;
     elapsedMs: number;
+    /** Mirrors `TiddlyWebSyncResult.pluginsChanged` — see that field's JSDoc. */
+    pluginsChanged: boolean;
   }
   | { phase: 'error'; workspaceId: string; message: string };
 

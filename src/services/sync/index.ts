@@ -69,7 +69,36 @@ export class Sync implements ISyncService {
       // its own concurrency (one in-flight sync per workspace) and conflict
       // policy. There is no concept of sub-wikis for TiddlyWeb sync.
       const tiddlyWebSync = container.get<ITiddlyWebSyncService>(serviceIdentifier.TiddlyWebSync);
-      await tiddlyWebSync.syncWorkspace(idToUse);
+      const result = await tiddlyWebSync.syncWorkspace(idToUse);
+      // If the pass touched any plugin / theme / language tiddler, the running
+      // wiki worker is now stale: TW only materialises a plugin's shadow
+      // tiddlers and runs its JS modules during `boot.startup()`, so the
+      // runtime `addTiddler` that sync just performed leaves the plugin inert
+      // and the wiki shows the "please save and reload" banner plus whatever
+      // visual breakage comes from a half-loaded theme. Mirror the git-sync
+      // branch below: restart the worker (which re-reads tiddlers from disk
+      // with plugins active this time) and reload the browser view so the
+      // user sees the corrected UI. Skipping the restart when the
+      // filesystem-watch feature is on matches the git path — the watcher
+      // picks up file changes without a full worker bounce.
+      //
+      // Defensive `result !== undefined` check: syncWorkspace returns
+      // undefined for non-tiddlyweb or mis-configured workspaces, but we
+      // only reach this branch when storageService === tiddlyweb, so it's
+      // belt-and-braces for the error path.
+      if (result?.pluginsChanged && !workspace.enableFileSystemWatch) {
+        logger.info('TiddlyWebSync: plugin/theme/language tiddlers changed, restarting workspace view', {
+          workspaceId: idToUse,
+        });
+        // `restartWorkspaceViewService` already calls `reloadViewsWebContents`
+        // internally at the end of its sequence. Calling it again here would
+        // abort the in-flight navigation that `restart` just kicked off,
+        // producing a benign-but-noisy `ERR_ABORTED (-3)` toast ("E-9
+        // 网页加载失败") right when the user expects a clean reload. One
+        // `restartWorkspaceViewService` call is enough — it does stopWiki +
+        // initializeWorkspaceView + reloadViews.
+        await workspaceViewService.restartWorkspaceViewService(idToUse);
+      }
     } else if (
       typeof gitUrl === 'string' &&
       userInfo !== undefined

@@ -35,6 +35,7 @@ import type { IWorkspaceService } from '@services/workspaces/interface';
 import { isWikiWorkspace } from '@services/workspaces/interface';
 
 import { TiddlyWebClient, type TiddlerFields } from './client';
+import { FILTER_PRESET_CONTENT_AND_SETTINGS } from './filterPresets';
 import { computeTiddlerHash } from './hash';
 import type {
   ITiddlyWebSyncService,
@@ -55,6 +56,34 @@ import { TiddlyWebSyncStateStore } from './stateStore';
 
 /** Tiddler title prefix where we save pre-overwrite local copies on conflict. */
 const CONFLICT_BACKUP_PREFIX = '$:/sync/conflicts/';
+
+/**
+ * Title prefixes that identify a tiddler as part of a plugin / theme / language
+ * bundle. Writing or deleting any of these at runtime requires a wiki-worker
+ * restart for TiddlyWiki to re-extract the plugin's shadow tiddlers and
+ * re-execute its JS modules — `addTiddler` alone just updates the store and
+ * surfaces the "please reload" banner, leaving the plugin inert.
+ *
+ * `$:/config/Plugins/Disabled/` is also on this list because toggling a
+ * plugin's enabled flag only takes effect at boot.
+ */
+const PLUGIN_TITLE_PREFIXES: readonly string[] = [
+  '$:/plugins/',
+  '$:/themes/',
+  '$:/languages/',
+  '$:/config/Plugins/Disabled/',
+];
+
+/**
+ * Exported only so unit tests can exercise the title-prefix logic directly.
+ * Production callers should not rely on this outside the sync service.
+ */
+export function isPluginTitle(title: string): boolean {
+  for (const prefix of PLUGIN_TITLE_PREFIXES) {
+    if (title.startsWith(prefix)) return true;
+  }
+  return false;
+}
 
 /** Temporary tiddler that holds the user's exclude filter so we can use it via `subfilter{...}`. */
 const EXCLUDE_FILTER_TEMP_TITLE = '$:/temp/tidgi/tiddlyweb-sync-exclude';
@@ -377,7 +406,7 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
       progress.next({ phase: 'reading-local', workspaceId });
       const excludeFilter = workspace.tiddlywebExcludeFilter && workspace.tiddlywebExcludeFilter.trim().length > 0
         ? workspace.tiddlywebExcludeFilter
-        : '[prefix[$:/]]';
+        : FILTER_PRESET_CONTENT_AND_SETTINGS;
       const localFieldsList = await this.readLocalTiddlers(workspaceId, excludeFilter);
       const localFieldsByTitle = new Map<string, TiddlerFields>();
       const local = new Map<string, LocalTiddlerState>();
@@ -386,6 +415,10 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
         localFieldsByTitle.set(fields.title, fields);
         local.set(fields.title, { hash: computeTiddlerHash(fields) });
       }
+      // Read ALL tiddler titles (no filter) to detect tiddlers that exist on
+      // disk but are excluded from the local map. The reconciler would otherwise
+      // see L=undefined and emit delete-remote, mistaking "excluded" for "deleted".
+      const allLocalTitles = await this.readAllLocalTitles(workspaceId);
 
       // ── 2. List remote tiddlers ───────────────────────────────────────
       progress.next({ phase: 'listing-remote', workspaceId });
@@ -453,7 +486,14 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
       }
 
       // ── 3. Reconcile ──────────────────────────────────────────────────
-      const actions = reconcile({ local, remote, syncState: store.all() });
+      const rawActions = reconcile({ local, remote, syncState: store.all() });
+      // Guard: a tiddler excluded from local reading (not in `local` map) but
+      // still present on disk appears as L=undefined to the reconciler, which
+      // emits delete-remote thinking the user deleted it. Skip those deletes.
+      const actions = rawActions.filter(action => {
+        if (action.type !== 'delete-remote') return true;
+        return !(allLocalTitles.has(action.title) && !local.has(action.title));
+      });
       const summary = summarise(actions);
       progress.next({ phase: 'reconciled', workspaceId, summary });
       logger.info('TiddlyWebSync: reconciled', { workspaceId, summary });
@@ -482,6 +522,16 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
       let lastCheckpoint = 0;
       let lastProgressAt = 0;
       let checkpointInFlight: Promise<void> | undefined;
+      // Set to true as soon as we successfully apply a pull/delete-local/
+      // conflict-backup-local on any `$:/plugins/…`, `$:/themes/…`,
+      // `$:/languages/…` or `$:/config/Plugins/Disabled/…` title. Caller uses
+      // this to decide whether to restart the wiki worker after the pass —
+      // TW only activates plugins at boot, so mutating them at runtime leaves
+      // the wiki in the broken state that prompts "please save and reload".
+      // Push / delete-remote don't count: they only affect the server side.
+      // Safe to mutate from the worker closures below — JS is single-threaded
+      // and the workers yield cooperatively on await.
+      let pluginsChanged = false;
       const workerCount = Math.min(APPLY_CONCURRENCY, actions.length);
       const workers = Array.from({ length: workerCount }, async () => {
         while (true) {
@@ -504,6 +554,18 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
           }
           try {
             await this.applyAction(action, workspaceId, client, store, localFieldsByTitle, wikiService);
+            // Flag only AFTER the action succeeded — if the HTTP/wiki call
+            // failed we don't want to restart for a write that never landed.
+            // Push and delete-remote are server-side only (local bytes
+            // unchanged), so they're deliberately excluded.
+            if (
+              (action.type === 'pull'
+                || action.type === 'delete-local'
+                || action.type === 'conflict-backup-local')
+              && isPluginTitle(action.title)
+            ) {
+              pluginsChanged = true;
+            }
           } catch (error) {
             const message = (error as Error).message ?? String(error);
             errors.push({
@@ -550,6 +612,7 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
         summary,
         errors: errors.length,
         elapsedMs: finishedAt - startedAt,
+        pluginsChanged,
       });
       this.lastErrors.delete(workspaceId);
       logger.info('TiddlyWebSync: sync finished', {
@@ -557,8 +620,9 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
         summary,
         errors: errors.length,
         elapsedMs: finishedAt - startedAt,
+        pluginsChanged,
       });
-      return { workspaceId, startedAt, finishedAt, summary, errors };
+      return { workspaceId, startedAt, finishedAt, summary, errors, pluginsChanged };
     } catch (error) {
       const message = (error as Error).message ?? String(error);
       this.lastErrors.set(workspaceId, message);
@@ -730,6 +794,13 @@ export class TiddlyWebSync implements ITiddlyWebSyncService {
     const result = await wikiService.wikiOperationInServer(WikiChannel.getTiddlersAsJson, workspaceId, [filter]);
     if (!Array.isArray(result)) return [];
     return (result as Array<Record<string, unknown>>).map((raw) => normaliseLocalFields(raw));
+  }
+
+  private async readAllLocalTitles(workspaceId: string): Promise<Set<string>> {
+    const wikiService = container.get<IWikiService>(serviceIdentifier.Wiki);
+    const result = await wikiService.wikiOperationInServer(WikiChannel.runFilter, workspaceId, ['[all[tiddlers]]']);
+    if (!Array.isArray(result)) return new Set();
+    return new Set((result as unknown[]).filter((t): t is string => typeof t === 'string'));
   }
 
   private async writeTiddlerLocally(fields: TiddlerFields, wikiService: IWikiService, workspaceId: string): Promise<void> {

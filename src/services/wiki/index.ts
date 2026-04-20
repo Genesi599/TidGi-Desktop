@@ -3,7 +3,7 @@ import { createWorkerProxy, terminateWorker } from '@services/libs/workerAdapter
 import { dialog, shell } from 'electron';
 import { attachWorker } from 'electron-ipc-cat/server';
 import { backOff } from 'exponential-backoff';
-import { copy, emptyDir, exists, mkdir, mkdirs, pathExists, readdir, readFile, remove, writeFile } from 'fs-extra';
+import { copy, exists, mkdir, mkdirs, pathExists, readdir, readFile, remove, writeFile } from 'fs-extra';
 import os from 'os';
 import { inject, injectable } from 'inversify';
 import path from 'path';
@@ -32,10 +32,11 @@ import { AlreadyExistError, CopyWikiTemplateError, DoubleWikiInstanceError, HTML
 import type { IWikiService, IWorkerInfo } from './interface';
 import { WikiControlActions } from './interface';
 import { extractSeedEntriesFromFile } from './snapshotSeedExtractor';
+import { selectiveWipeTiddlersFolder } from './selectiveWipeTiddlersFolder';
 import type { IStartNodeJSWikiConfigs, WikiWorker } from './wikiWorker';
 import type { IpcServerRouteMethods, IpcServerRouteNames, ITidGiChangedTiddlers } from './wikiWorker/ipcServerRoutes';
 
-import { LOG_FOLDER } from '@/constants/appPaths';
+import { LOG_FOLDER, USER_DATA_FOLDER } from '@/constants/appPaths';
 import { isDevelopmentOrTest } from '@/constants/environment';
 import { isHtmlWiki } from '@/constants/fileNames';
 import { defaultServerIP } from '@/constants/urls';
@@ -61,17 +62,47 @@ export class Wiki implements IWikiService {
 
   // handlers
   /**
-   * Wipe the contents of a wiki's `tiddlers/` folder (keep the folder itself).
+   * Wipe a cloned wiki's `tiddlers/` folder down to a minimal fallback UI.
    *
-   * Used by the "Clone from TiddlyWeb server" workflow: TidGi's template ships
-   * ~76 pre-baked `.tid`/`.json` files (an `Index.tid` welcome tiddler + 12MB
-   * of plugin JSON bodies under `tiddlers/system/`). Without wiping those, the
-   * very first sync would see them as "local-only, new" and PUSH them all to
-   * the remote server — polluting the server and possibly breaking it.
+   * Used by the "Clone from TiddlyWeb server" workflow. Policy has to
+   * balance three pressures, and earlier iterations failed each one:
    *
-   * `tiddlywiki.info`, `plugins/`, `public/`, `scripts/`, `.github/`, etc. are
-   * left untouched. Those drive the local wiki's boot sequence; they never
-   * travel over the TiddlyWeb API.
+   * 1. **Don't pollute the server.** TidGi's template ships user-visible
+   *    tiddlers directly under `tiddlers/` (`Index.tid` welcome page,
+   *    branded icons, `TheBrain.tid`, etc). Those have no `$:/` prefix,
+   *    so the reconciler's default exclude filter `[prefix[$:/]]` does
+   *    NOT skip them — on first sync they would show up as `L && !R && !S`
+   *    and get PUSHED to the server, polluting it with TidGi's welcome
+   *    content. All top-level files therefore must go.
+   *
+   * 2. **Don't boot the wiki themeless.** The TiddlyWeb REST API never
+   *    exposes plugin shadows, and externalised-storage servers (where
+   *    the root HTML is a manifest rather than a self-contained wiki)
+   *    don't inline themes / languages either. If we wiped absolutely
+   *    everything, the cloned wiki would boot with no theme — sidebar
+   *    stuck at the top of the page, no styles, raw HTML layout (this
+   *    was the "还是不行" report). So at least a fallback theme has to
+   *    survive the wipe.
+   *
+   * 3. **Don't stomp the user's plugins with TidGi's curated set.** The
+   *    template also ships ~60 plugin bundles under `system/`
+   *    (`$__plugins_linonetwo_*`, `$__plugins_Gk0Wk_*`, etc). Previous
+   *    iterations preserved the whole `system/` folder, which meant the
+   *    cloned wiki ran with TidGi's plugin set instead of the user's
+   *    server's plugins — "为什么插件还是用的 tidgi 自带的插件啊". Those
+   *    template plugins must therefore ALSO be wiped, so the only plugins
+   *    left are the ones the server supplies (via HTML-snapshot extraction
+   *    and/or TiddlyWeb sync).
+   *
+   * Implementation: delegates to {@link selectiveWipeTiddlersFolder}. It
+   * removes everything under `tiddlers/` except a tiny whitelist inside
+   * `tiddlers/system/` (currently just `$__themes_tiddlywiki_vanilla.json`
+   * and its `.meta` sidecar) to satisfy concern #2. Concerns #1 and #3
+   * fall out automatically because everything else is removed.
+   *
+   * `tiddlywiki.info`, `plugins/`, `public/`, `scripts/`, `.github/`, etc.
+   * are left untouched. Those drive the local wiki's boot sequence; they
+   * never travel over the TiddlyWeb API.
    */
   public async emptyWikiTiddlersFolder(wikiFolderPath: string): Promise<void> {
     const tiddlersDir = path.join(wikiFolderPath, 'tiddlers');
@@ -79,8 +110,9 @@ export class Wiki implements IWikiService {
       logger.debug('emptyWikiTiddlersFolder: tiddlers/ does not exist, nothing to do', { tiddlersDir });
       return;
     }
-    logger.info('Emptying tiddlers/ folder for clean clone', { tiddlersDir });
-    await emptyDir(tiddlersDir);
+    logger.info('Emptying tiddlers/ top level for clean clone (keeping system/)', { tiddlersDir });
+    const { removed, preserved } = await selectiveWipeTiddlersFolder(tiddlersDir);
+    logger.info('emptyWikiTiddlersFolder: selective wipe complete', { tiddlersDir, removed, preserved });
   }
 
   /**
@@ -107,6 +139,67 @@ export class Wiki implements IWikiService {
    * Non-fatal: if the download or extract fails, returns `{ imported: 0,
    * errorMessage }`. Caller should continue with HTTP-only sync.
    */
+  /**
+   * Persistent cache directory for HTML snapshots downloaded via
+   * `importTiddlersFromHtmlUrl`. Keyed by a sanitised version of the URL so
+   * repeated test runs skip the download. Delete the file to force a refresh.
+   */
+  private readonly htmlSnapshotCacheDir = path.join(USER_DATA_FOLDER, 'html-snapshot-cache');
+
+  private getHtmlSnapshotCachePath(url: string): string {
+    const safe = url.replace(/[^a-zA-Z0-9.-]/g, '_').slice(0, 200);
+    return path.join(this.htmlSnapshotCacheDir, `${safe}.html`);
+  }
+
+  /**
+   * Merge library-plugin references from an extracted tiddlywiki.info into
+   * the destination wiki's tiddlywiki.info. See the call site in
+   * {@link importTiddlersFromHtmlUrl} for rationale — built-in plugins
+   * propagate via info arrays, not tiddler files.
+   *
+   * De-duplicates per array and never overwrites other top-level fields
+   * (description, build, config, ...) — those stay TidGi's. Best-effort:
+   * any read/parse/write failure is logged and swallowed so a malformed
+   * info file doesn't abort the whole clone.
+   */
+  private async mergeExtractedPluginRefsIntoInfo(tempExtracted: string, wikiFolderLocation: string): Promise<void> {
+    const extractedInfoPath = path.join(tempExtracted, 'tiddlywiki.info');
+    const destInfoPath = path.join(wikiFolderLocation, 'tiddlywiki.info');
+    try {
+      if (!(await pathExists(extractedInfoPath)) || !(await pathExists(destInfoPath))) {
+        return;
+      }
+      const extractedRaw = await readFile(extractedInfoPath, 'utf8');
+      const destRaw = await readFile(destInfoPath, 'utf8');
+      const extracted = JSON.parse(extractedRaw) as { plugins?: string[]; themes?: string[]; languages?: string[] };
+      const dest = JSON.parse(destRaw) as { plugins?: string[]; themes?: string[]; languages?: string[] };
+      let changed = false;
+      for (const key of ['plugins', 'themes', 'languages'] as const) {
+        const incoming = extracted[key];
+        if (!Array.isArray(incoming) || incoming.length === 0) continue;
+        const existing = new Set(dest[key] ?? []);
+        const before = existing.size;
+        for (const name of incoming) {
+          if (typeof name === 'string') existing.add(name);
+        }
+        if (existing.size !== before) {
+          dest[key] = [...existing];
+          changed = true;
+        }
+      }
+      if (changed) {
+        await writeFile(destInfoPath, JSON.stringify(dest, null, 4), 'utf8');
+        logger.info('importTiddlersFromHtmlUrl: merged library-plugin refs into tiddlywiki.info', {
+          plugins: dest.plugins?.length ?? 0,
+          themes: dest.themes?.length ?? 0,
+          languages: dest.languages?.length ?? 0,
+        });
+      }
+    } catch (error) {
+      logger.warn('importTiddlersFromHtmlUrl: failed to merge tiddlywiki.info plugin refs', { error });
+    }
+  }
+
   public async importTiddlersFromHtmlUrl(
     wikiFolderLocation: string,
     url: string,
@@ -117,23 +210,37 @@ export class Wiki implements IWikiService {
     errorMessage?: string;
     seedEntries?: Array<{ title: string; revision: string; bag?: string }>;
   }> {
-    const headers: Record<string, string> = { Accept: 'text/html' };
-    if (username.length > 0 || password.length > 0) {
-      const token = Buffer.from(`${username}:${password}`, 'utf8').toString('base64');
-      headers.Authorization = `Basic ${token}`;
-    }
+    const cachePath = this.getHtmlSnapshotCachePath(url);
     let html: string;
-    try {
-      const response = await fetch(url, { headers });
-      if (!response.ok) {
-        return { imported: 0, errorMessage: `HTTP ${response.status} ${response.statusText}` };
+    if (await pathExists(cachePath)) {
+      logger.info('importTiddlersFromHtmlUrl: using cached HTML snapshot', { url, cachePath });
+      html = await readFile(cachePath, 'utf8');
+    } else {
+      const headers: Record<string, string> = { Accept: 'text/html' };
+      if (username.length > 0 || password.length > 0) {
+        const token = Buffer.from(`${username}:${password}`, 'utf8').toString('base64');
+        headers.Authorization = `Basic ${token}`;
       }
-      html = await response.text();
-    } catch (error) {
-      return { imported: 0, errorMessage: (error as Error).message };
-    }
-    if (html.length === 0 || !html.includes('<html')) {
-      return { imported: 0, errorMessage: 'Server root did not return a TiddlyWiki HTML page.' };
+      try {
+        const response = await fetch(url, { headers });
+        if (!response.ok) {
+          return { imported: 0, errorMessage: `HTTP ${response.status} ${response.statusText}` };
+        }
+        html = await response.text();
+      } catch (error) {
+        return { imported: 0, errorMessage: (error as Error).message };
+      }
+      if (html.length === 0 || !html.includes('<html')) {
+        return { imported: 0, errorMessage: 'Server root did not return a TiddlyWiki HTML page.' };
+      }
+      // Persist for future runs. Best-effort — a write failure must not abort the import.
+      try {
+        await mkdirs(this.htmlSnapshotCacheDir);
+        await writeFile(cachePath, html, 'utf8');
+        logger.info('importTiddlersFromHtmlUrl: HTML snapshot cached', { url, cachePath });
+      } catch (error) {
+        logger.warn('importTiddlersFromHtmlUrl: failed to cache HTML snapshot', { cachePath, error });
+      }
     }
 
     const tempRoot = path.join(os.tmpdir(), `tidgi-html-snapshot-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
@@ -152,6 +259,28 @@ export class Wiki implements IWikiService {
       }
       const destTiddlers = path.join(wikiFolderLocation, 'tiddlers');
       await mkdirs(destTiddlers);
+      // Merge library-plugin references from extracted tiddlywiki.info into
+      // the destination's info. SaveWikiFolderCommand writes built-in plugins
+      // (ones that exist in the TW boot-path's plugins/ tree — highlight,
+      // codemirror, katex, etc.) as NAME REFERENCES inside tiddlywiki.info's
+      // `plugins` / `themes` / `languages` arrays, not as tiddler bundles in
+      // `tiddlers/`. If we don't propagate those arrays, the local wiki boots
+      // without plugins the server is visibly using (menu bar, search box,
+      // editor enhancements), even though HTML snapshot extraction "worked".
+      // Custom plugins with explodePlugins=no DO land in `tiddlers/` and are
+      // copied below; this merge only covers the library-reference path.
+      await this.mergeExtractedPluginRefsIntoInfo(tempExtracted, wikiFolderLocation);
+      // Also copy any `plugins/`, `themes/`, `languages/` subfolders that
+      // SaveWikiFolderCommand materialised for custom (non-library) plugins
+      // when `explodePlugins=yes` — these are bundled plugin sources that
+      // TW's boot scans from the wiki folder root. Harmless when absent
+      // (explodePlugins=no puts everything in tiddlers/ instead).
+      for (const bundleFolder of ['plugins', 'themes', 'languages']) {
+        const source = path.join(tempExtracted, bundleFolder);
+        if (await pathExists(source)) {
+          await copy(source, path.join(wikiFolderLocation, bundleFolder), { overwrite: true });
+        }
+      }
       const entries = await readdir(sourceTiddlers);
       let imported = 0;
       // Collect `(title, revision, bag)` triples as we go so the caller can

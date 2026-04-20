@@ -1,5 +1,6 @@
 import { WorkspaceChannel } from '@/constants/channels';
 import { PageType } from '@/constants/pageTypes';
+import { FILTER_PRESET_CONTENT_AND_SETTINGS } from '@services/tiddlywebSync/filterPresets';
 import { SupportedStorageServices } from '@services/types';
 import { ProxyPropertyType } from 'electron-ipc-cat/common';
 import { BehaviorSubject, Observable } from 'rxjs';
@@ -69,7 +70,7 @@ export const syncableConfigDefaultValues = {
   tiddlywebRecipe: 'default',
   tiddlywebUsername: '',
   tiddlywebSyncIntervalMs: 30_000,
-  tiddlywebExcludeFilter: '[prefix[$:/]]' as string,
+  tiddlywebExcludeFilter: FILTER_PRESET_CONTENT_AND_SETTINGS as string,
 } as const;
 
 export const localConfigDefaultValues = {
@@ -276,7 +277,9 @@ export interface IWikiWorkspace extends IDedicatedWorkspace {
   tiddlywebSyncIntervalMs?: number;
   /**
    * TiddlyWiki filter expression selecting tiddlers to EXCLUDE from sync.
-   * Default `[prefix[$:/]]` excludes all system tiddlers.
+   * Default is FILTER_PRESET_CONTENT_AND_SETTINGS: excludes transient UI state,
+   * plugin/theme/language bodies, and TW core/boot, but allows user settings
+   * like `$:/palette` and `$:/config/` to sync so styles follow the server.
    */
   tiddlywebExcludeFilter?: string;
   /**
